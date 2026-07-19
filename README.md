@@ -15,7 +15,7 @@ slaude               # sandboxed Claude Code for this project. That's it.
 ## Install
 
 ```bash
-vivary build                    # build both images (or: node cli/vivary.mjs build)
+vivary build                 # compose + build the image
 npm install -g ./cli         # installs the `vivary`, `slaude` and `sodex` commands
 ```
 
@@ -54,11 +54,10 @@ docker|container`, `--name`, `--workspace`, `--agent`. Environment defaults:
 stored in the sandbox config; `start`/`up` always use the stored runtime.
 `vivary ls` shows sandboxes of both runtimes side by side.
 
-## Images
+## Image
 
-### `agent-sandbox-base`
-
-Ubuntu 24.04 with the development toolchain:
+One fat image (`agent-sandbox-agents`) composed by `vivary build` from the
+core Dockerfile plus every plugin fragment — Ubuntu 24.04 with:
 
 | Component | Version / source |
 |---|---|
@@ -125,11 +124,6 @@ access to the host Docker daemon. Under the docker runtime this uses
 `--privileged` (contained by the Docker Desktop VM) and a named volume for
 `/var/lib/docker` (overlay2 can't sit on overlayfs); under Apple `container`
 the sandbox is its own VM, so neither is needed.
-
-### `agent-sandbox-agents`
-
-`FROM agent-sandbox-base`, adds Claude Code (native installer), Codex CLI and
-`ccstatusline`.
 
 ## How host sharing works
 
