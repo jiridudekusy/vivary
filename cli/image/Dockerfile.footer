@@ -1,0 +1,14 @@
+# ===== footer: entrypoint hooks and runtime user =====
+COPY entrypoint.d/ /etc/entrypoint.d/
+RUN chmod +x /etc/entrypoint.d/*.sh
+
+USER agent
+WORKDIR /workspace
+
+# DISPLAY is only meaningful once an X server runs (headed / clipboard hooks)
+ENV DISPLAY=:99 \
+    HISTFILE=/home/agent/.config/bash_history \
+    HISTSIZE=10000
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]

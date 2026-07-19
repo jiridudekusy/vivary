@@ -222,7 +222,21 @@ third-party firewall (e.g. Norton) must allow the flow — watch for its prompt.
 ## Repository layout
 
 ```
-cli/            Node.js CLI (vivary + slaude/sodex launchers), no dependencies
-base/           agent-sandbox-base image (toolchain + GUI stack + sshd)
-agents/         agent-sandbox-agents image (Claude Code + Codex + ccstatusline)
+cli/vivary.mjs         thin CLI entry (command dispatch, launcher dispatch)
+cli/core/              runtime abstraction, sandbox registry, lifecycle,
+                       broker kernel, image composer, plugin loader
+cli/plugins/<name>/    one feature = one plugin:
+                       plugin.mjs         host side (flags, run args, broker routes)
+                       image.dockerfile   fragment baked into the fat image
+                       rootfs/            files copied into the image
+                       entrypoint.d/      startup hooks (self-gated by env)
+cli/image/             core image (toolchain) + entrypoint runner
+bench/                 performance benchmarks
 ```
+
+**Architecture**: a small core plus plugins (headed, ssh, docker, host-open,
+clipboard, own-modules, agent-claude, agent-codex). `vivary build` composes
+ONE fat image from the core Dockerfile and every plugin fragment; features
+activate at runtime via env variables, so a single image serves all
+sandboxes. The container entrypoint just runs `/etc/entrypoint.d/*.sh` —
+each hook checks its own env variable.
