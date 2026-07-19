@@ -1,0 +1,15 @@
+{
+  "name": "vivary",
+  "version": "1.0.0",
+  "description": "Run AI coding agents (Claude Code, Codex) in isolated containers (Docker / Apple container)",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "vivary": "./vivary.mjs",
+    "slaude": "./vivary.mjs",
+    "sodex": "./vivary.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
