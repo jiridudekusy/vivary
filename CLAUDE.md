@@ -16,7 +16,7 @@ English, converse with the user in Czech.
 - `cli/plugins/<name>/` — one feature per plugin: `plugin.mjs` (host side:
   flags, runArgs/upArgs/postUp/onCreate/onPurge, needsBroker/needsCaps,
   broker routes, agents/launchers) + `image.dockerfile` fragment + `rootfs/`
-  + `entrypoint.d/` hooks. Plugins: headed(20), ssh(30), tailscale(35),
+  + `entrypoint.d/` hooks. Plugins: sudo(16), headed(20), ssh(30), tailscale(35),
   docker(40), npmrc(45), host-open(50), clipboard(60), own-modules(70),
   agent-claude(80), agent-codex(85), agent-cursor(90).
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.

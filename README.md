@@ -45,7 +45,7 @@ Agent launchers (equivalent to `vivary start --agent ... -- args`):
 - **`sodex`** — sandboxed **Codex**
 - **`sursor`** — sandboxed **Cursor CLI agent**
 
-Common options: `--headed`, `--docker`, `--memory 8g`, `--cpus 6`, `--runtime
+Common options: `--sudo` (full root in the sandbox), `--headed`, `--docker`, `--memory 8g`, `--cpus 6`, `--runtime
 docker|container`, `--name`, `--workspace`, `--agent`. Environment defaults:
 `SANDBOX_RUNTIME`, `SANDBOX_MEMORY`, `SANDBOX_CPUS`, `SANDBOXES_DIR`,
 `NOVNC_PORT`, `SSH_PORT`.
