@@ -77,6 +77,12 @@ English, converse with the user in Czech.
   discussed, deliberately not built yet.)
 - inotify race: new dir + immediate file creation misses events →
   modules-watch also handles directory-create events with a settle+rescan.
+- --sudo cannot exceed the HOST user's file rights: on macOS the mount
+  daemons (Apple virtiofs, Docker Desktop file sharing) run as the host
+  user, so even container-root I/O executes with their privileges (verified:
+  chown root inside a mount is a no-op; files land jdk-owned on the host).
+  Would NOT hold on a Linux host with plain bind mounts — needs userns-remap
+  there (relevant for future Linux/Windows support).
 
 ## Testing recipes (manual smoke)
 
