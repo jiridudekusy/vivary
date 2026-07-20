@@ -24,13 +24,58 @@ async function selectItems(kind, items) {
   return picked;
 }
 
+// Rewrite host-specific bits for use inside the container: absolute paths
+// under the host home, and loopback URLs (a marketplace served from a
+// host-local git server is reachable from the container only via
+// host.docker.internal).
+export function rewriteForContainer(text) {
+  return text
+    .split(HOME).join('/home/agent')
+    .replace(/\b(127\.0\.0\.1|localhost)\b/g, 'host.docker.internal');
+}
+
+// Plugin state (~/.claude/plugins): settings.json carries enabledPlugins /
+// extraKnownMarketplaces, so the marketplace clones + plugin cache must come
+// along or claude reports every enabled plugin as an error. Rides under the
+// same consent as the settings import.
+export function importPlugins(dir) {
+  const src = path.join(HOST_CLAUDE_DIR, 'plugins');
+  if (!fs.existsSync(src)) return;
+  const dst = path.join(dir, 'dot-claude/plugins');
+  fs.rmSync(dst, { recursive: true, force: true });
+  fs.cpSync(src, dst, { recursive: true });
+  for (const f of ['known_marketplaces.json', 'installed_plugins.json']) {
+    const p = path.join(dst, f);
+    if (fs.existsSync(p)) fs.writeFileSync(p, rewriteForContainer(fs.readFileSync(p, 'utf8')));
+  }
+  // Marketplace clones served from the host loopback: fix the git remote so
+  // a /plugin refresh targets the host, not the container itself.
+  const mps = path.join(dst, 'marketplaces');
+  for (const d of fs.existsSync(mps) ? fs.readdirSync(mps) : []) {
+    const gitConfig = path.join(mps, d, '.git/config');
+    if (!fs.existsSync(gitConfig)) continue;
+    const text = fs.readFileSync(gitConfig, 'utf8');
+    const rewritten = rewriteForContainer(text);
+    if (rewritten !== text) fs.writeFileSync(gitConfig, rewritten);
+  }
+  console.log('  imported plugins (marketplaces + cache; host paths and loopback URLs rewritten)');
+}
+
 function importSettings(dir) {
   const hostSettings = path.join(HOST_CLAUDE_DIR, 'settings.json');
   if (!fs.existsSync(hostSettings)) return;
   const settings = readJson(hostSettings, {});
   delete settings.hooks; // hooks reference host paths — never import them
+  // Only this subtree gets the loopback rewrite — a blanket rewrite could
+  // mangle unrelated settings (e.g. permission rules mentioning localhost).
+  if (settings.extraKnownMarketplaces) {
+    settings.extraKnownMarketplaces = JSON.parse(
+      rewriteForContainer(JSON.stringify(settings.extraKnownMarketplaces))
+    );
+  }
   fs.writeFileSync(path.join(dir, 'dot-claude/settings.json'), JSON.stringify(settings, null, 2));
   console.log('  imported settings.json (without hooks)');
+  importPlugins(dir);
   // Status line: the command (e.g. ccstatusline) is baked into the image;
   // carry over its visual config from ~/.config.
   const slCmd = (settings.statusLine?.command || '').split(/\s+/)[0];
