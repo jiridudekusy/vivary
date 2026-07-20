@@ -50,10 +50,12 @@ English, converse with the user in Czech.
   white/corrupt into Xvfb — GUI must run in the main process tree. Default
   VM: 1 GB/4 CPU → vivary defaults 4 GB/4.
 - virtiofs: cannot chmod unix sockets (EINVAL) → `~/.claude/remote/run`
-  symlinked to VM-local fs (Claude Desktop remote daemon); same for
+  symlinked to VM-local fs (Claude Desktop remote daemon).
   `~/.codex/app-server-control` (Codex app-server control socket — phone/IDE
-  SSH remote control dies with "Starting Codex failed" otherwise). Nested
-  mounts avoided via non-nested mount + symlink (host-projects).
+  SSH remote control) has the same problem but codex REJECTS a symlinked
+  control dir ("exists and is not a directory") → tmpfs mounted over it
+  (`--tmpfs`, works on both runtimes, nests fine inside a virtiofs mount).
+  Nested mounts avoided via non-nested mount + symlink (host-projects).
 - macOS host: **Norton firewall + Local Network TCC** silently black-hole
   container→host connections (SYN is ACKed by the egress proxy, data dies —
   even closed ports look "open"). User must allow prompts.
