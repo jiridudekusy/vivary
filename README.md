@@ -107,6 +107,15 @@ are picked up **live** by an inotify watcher (overlay lands before the first
 `npm install`). Host-side additions are picked up on restart.
 `--own-modules=0` disables. Overlay failures are loud, never silent.
 
+**npmrc import** (`--npmrc[=…]`, sticky per sandbox): carries the host
+`~/.npmrc` into the sandbox, re-read on every start (token rotation just
+works). Values: bare = whole file; `registries` = no credentials;
+comma list = selective (`default`, `@scope`, hostname fragment — e.g.
+`--npmrc=default,nexus.cams`); `off` disables. localhost registries are
+rewritten to `host.docker.internal` (including the auth keys npm matches by
+URL), `cafile` paths are copied along, and `${VAR}` token references are
+injected via container env at start — never stored in the sandbox state.
+
 **Clipboard bridge** (`--clipboard`, sticky per sandbox): the host clipboard
 reaches the sandbox — **Ctrl+V pastes a host screenshot straight into Claude
 Code** (it reads images via `xclip`, which is shimmed to fetch from the
