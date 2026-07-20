@@ -47,6 +47,10 @@ function ensureSshConfigEntry(name, host, port, dir) {
     '    User agent',
     `    Port ${port}`,
     `    IdentityFile ${path.join(dir, 'ssh/id_ed25519')}`,
+    // Without IdentitiesOnly, ssh offers every agent-loaded key first and a
+    // well-stocked agent exhausts MaxAuthTries before our key is tried
+    // ("Too many authentication failures", seen with Cursor Remote-SSH).
+    '    IdentitiesOnly yes',
     `    UserKnownHostsFile ${path.join(HOME, '.ssh/known_hosts')}`,
     '    StrictHostKeyChecking accept-new',
     end,
