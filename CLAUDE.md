@@ -55,6 +55,9 @@ English, converse with the user in Czech.
   SSH remote control) has the same problem but codex REJECTS a symlinked
   control dir ("exists and is not a directory") → tmpfs mounted over it
   (`--tmpfs`, works on both runtimes, nests fine inside a virtiofs mount).
+  The tmpfs comes up root-owned and Apple `container` has no uid/mode tmpfs
+  options → codex dies with EPERM securing the dir → fix-codex-ctl sudo
+  helper chowns it to agent at boot.
   Nested mounts avoided via non-nested mount + symlink (host-projects).
 - macOS host: **Norton firewall + Local Network TCC** silently black-hole
   container→host connections (SYN is ACKed by the egress proxy, data dies —
