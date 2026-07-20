@@ -1,6 +1,6 @@
 # vivary — notes for Claude
 
-Sandboxed AI coding agents (Claude Code, Codex) in Docker / Apple `container`
+Sandboxed AI coding agents (Claude Code, Codex, Cursor) in Docker / Apple `container`
 with deep host integration. Owner: Jiří Dudek (jiridudekusy). Repo:
 https://github.com/jiridudekusy/vivary (private). Language: code/docs in
 English, converse with the user in Czech.
@@ -8,7 +8,7 @@ English, converse with the user in Czech.
 ## Architecture (post core+plugins refactor)
 
 - `cli/vivary.mjs` — thin entry; dispatches commands and agent launchers
-  (`slaude`=claude, `sodex`=codex) by argv0.
+  (`slaude`=claude, `sodex`=codex, `sursor`=cursor) by argv0.
 - `cli/core/` — util, runtime (docker/apple abstraction), sandbox registry
   (sandbox.json, **sticky flags** as a generic service), lifecycle
   (start/up/down/shell/ls/rm/create), broker kernel (HTTP, token, audit log —
@@ -18,7 +18,8 @@ English, converse with the user in Czech.
   broker routes, agents/launchers) + `image.dockerfile` fragment + `rootfs/`
   + `entrypoint.d/` hooks. Plugins: headed(20), ssh(30), tailscale(35),
   docker(40), npmrc(45), host-open(50), clipboard(60), own-modules(70),
-  agent-claude(80), agent-codex(85).
+  agent-claude(80), agent-codex(85), agent-cursor(90).
+  `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).

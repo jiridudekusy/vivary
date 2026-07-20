@@ -2,7 +2,7 @@
 
 *A vivary is an enclosure for keeping live creatures under observation.*
 
-Run AI coding agents (Claude Code, Codex) in isolated containers — **Docker**
+Run AI coding agents (Claude Code, Codex, Cursor) in isolated containers — **Docker**
 or **Apple `container`** — while keeping host-level convenience: shared chat
 history, one-time login, imported settings/skills/MCP, a browser the agent can
 drive (headless or visible via noVNC), and SSH access for Claude Desktop.
@@ -16,7 +16,7 @@ slaude               # sandboxed Claude Code for this project. That's it.
 
 ```bash
 vivary build                 # compose + build the image
-npm install -g ./cli         # installs the `vivary`, `slaude` and `sodex` commands
+npm install -g ./cli         # installs the `vivary`, `slaude`, `sodex` and `sursor` commands
 ```
 
 Requires Node.js >= 20 on the host and Docker and/or Apple `container`.
@@ -43,6 +43,7 @@ Agent launchers (equivalent to `vivary start --agent ... -- args`):
 - **`slaude`** — sandboxed **Claude Code** in the current directory (`slaude -r`
   passes `-r` to claude)
 - **`sodex`** — sandboxed **Codex**
+- **`sursor`** — sandboxed **Cursor CLI agent**
 
 Common options: `--headed`, `--docker`, `--memory 8g`, `--cpus 6`, `--runtime
 docker|container`, `--name`, `--workspace`, `--agent`. Environment defaults:
@@ -153,6 +154,7 @@ Per-sandbox state lives in `~/claude-sandboxes/<name>/`:
 | `dot-claude/` | `/home/agent/.claude` | settings, skills, credentials, CLI config (`CLAUDE_CONFIG_DIR`) — survives container deletion |
 | `dot-config/` | `/home/agent/.config` | status line config etc. |
 | `dot-codex/` | `/home/agent/.codex` | Codex auth/state |
+| `dot-cursor/` | `/home/agent/.cursor` | Cursor CLI auth/state |
 | `ssh/` | `/home/agent/host-ssh` | SSH keypair + persisted host keys |
 | `~/.claude/projects/<workspace-slug>*` (only this project + its subdirs) | `/home/agent/host-projects/<slug>` → symlinked to `~/.claude/projects` | **chats land directly in the host's history** — but the container never sees other projects' chats |
 | `<workspace>` | same absolute path | history slug derives from cwd — identical paths mean host `claude --resume` sees container sessions natively |

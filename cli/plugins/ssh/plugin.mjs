@@ -4,8 +4,10 @@
 // marker-delimited ~/.ssh/config Host block on the host.
 import fs from 'node:fs';
 import path from 'node:path';
-import { HOME, capture, die } from '../../core/util.mjs';
-import { containerName, containerDnsDomain } from '../../core/runtime.mjs';
+import { HOME, capture, die, hasCmd, parseArgs } from '../../core/util.mjs';
+import { containerName, containerDnsDomain, isRunning } from '../../core/runtime.mjs';
+import { ensureSandbox } from '../../core/sandbox.mjs';
+import { cmdUp } from '../../core/lifecycle.mjs';
 
 function registerKnownHosts(dir, host, port) {
   const kh = path.join(HOME, '.ssh/known_hosts');
@@ -78,9 +80,27 @@ function removeSshArtifacts(name) {
   }
 }
 
+// `vivary ide [name] [--editor <bin>]` — open a Remote-SSH IDE window
+// connected into the sandbox. Rides on the managed ~/.ssh/config alias, so
+// it works with any VS Code-family editor; prefers Cursor when installed.
+// Implies `vivary up` when the sandbox is not running.
+async function cmdIde(argv) {
+  const { flags, positionals } = parseArgs(argv, { name: 'string', editor: 'string' });
+  const cfg = await ensureSandbox(flags.name || positionals[0], flags);
+  const editor = flags.editor || ['cursor', 'code'].find((c) => hasCmd(c))
+    || die("no 'cursor' or 'code' CLI on the host — install the editor's shell command");
+  if (!hasCmd(editor)) die(`editor CLI not found: ${editor}`);
+  if (!isRunning(cfg.runtime, cfg.name)) await cmdUp([cfg.name]);
+  const alias = containerName(cfg.name); // == the managed ssh_config Host
+  const r = capture(editor, ['--remote', `ssh-remote+${alias}`, cfg.workspace]);
+  if (r.status !== 0) die(`${editor} failed: ${r.stderr || r.stdout}`);
+  console.log(`==> ${editor}: opening ${cfg.workspace} on ${alias} (Remote-SSH)`);
+}
+
 export default {
   name: 'ssh',
   order: 30,
+  commands: { ide: cmdIde },
 
   async upArgs(ctx) {
     const { cfg, dir, cname } = ctx;

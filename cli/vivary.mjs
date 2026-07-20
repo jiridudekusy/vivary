@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// vivary — run AI agents (Claude Code, Codex) in isolated containers
+// vivary — run AI agents (Claude Code, Codex, Cursor) in isolated containers
 // (Docker or Apple `container`) while sharing chat history, login and
 // selected configuration with the host.
 //
 // Architecture: a small core (runtime, sandbox registry, lifecycle, broker
 // kernel, image composer) plus plugins (plugins/<name>/) that contribute
 // flags, container run args, image fragments, entrypoint hooks and broker
-// routes. Agent launchers (slaude, sodex) dispatch on the binary name.
+// routes. Agent launchers (slaude, sodex, sursor) dispatch on the binary name.
 import path from 'node:path';
 import { die, parseArgs, pkg } from './core/util.mjs';
 import { loadPlugins, agentRegistry, pluginCommands, pluginHelp } from './core/plugins.mjs';
@@ -35,6 +35,8 @@ Commands:
   up [name]            Long-running container with sshd — for Claude Desktop
                        (Code tab -> "+ Add SSH connection"), IDEs, ssh.
   down [name]          Stop the long-running container.
+  ide [name]           Open Cursor/VS Code into the sandbox via Remote-SSH
+                       (implies 'up' when needed; --editor <bin> to force).
   ls | list            List sandboxes across runtimes.
   shell [name]         Bash in the sandbox (attaches if running, otherwise
                        starts a container; auto-creates like start).
