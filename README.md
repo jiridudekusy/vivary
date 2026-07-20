@@ -127,6 +127,16 @@ Per-sandbox permission enforced by the broker;
 reads/writes are logged. Note the host clipboard may hold sensitive data —
 enable only where you want it.
 
+**Tailscale** (`--tailscale`, sticky per sandbox): tailnet integration in
+both directions. Outbound: raw 100.x connectivity works through the host's
+NAT out of the box; MagicDNS names (short + FQDN) are injected into the
+container's /etc/hosts from `tailscale status` at every start. Inbound:
+`vivary up` publishes the sandbox's sshd on a stable per-sandbox port
+(22000+), so any tailnet device reaches it at `<host-magicdns>:<port>` —
+Claude Desktop from your laptop, ssh from an iPad. The identity file lives
+on the container host (`~/claude-sandboxes/<name>/ssh/`); copy it to the
+client once.
+
 **Docker-in-sandbox**: start with `--docker` (sticky per sandbox) and agents
 can build and run containers inside — `dockerd` runs in the sandbox, with no
 access to the host Docker daemon. Under the docker runtime this uses
