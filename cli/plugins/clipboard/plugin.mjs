@@ -42,13 +42,19 @@ function readPng() {
   }
 }
 
+// pbcopy/pbpaste transcode to/from the *process locale's* encoding, so the
+// broker daemon — spawned detached with whatever (often empty → Mac Roman)
+// environment — would mangle UTF-8 box-drawing/diacritics. Force a UTF-8
+// locale for these spawns so the byte stream is always UTF-8.
+const CLIP_ENV = { ...process.env, LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' };
+
 function readText() {
-  const r = spawnSync('pbpaste', [], { encoding: 'buffer' });
+  const r = spawnSync('pbpaste', [], { encoding: 'buffer', env: CLIP_ENV });
   return r.status === 0 ? r.stdout : Buffer.alloc(0);
 }
 
 function writeText(text) {
-  return spawnSync('pbcopy', [], { input: text }).status === 0;
+  return spawnSync('pbcopy', [], { input: text, env: CLIP_ENV }).status === 0;
 }
 
 // What the host clipboard currently offers, in X11 TARGETS vocabulary —
