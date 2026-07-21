@@ -16,10 +16,14 @@ English, converse with the user in Czech.
 - `cli/plugins/<name>/` — one feature per plugin: `plugin.mjs` (host side:
   flags, runArgs/upArgs/postUp/onCreate/onPurge, needsBroker/needsCaps,
   broker routes, agents/launchers) + `image.dockerfile` fragment + `rootfs/`
-  + `entrypoint.d/` hooks. Plugins: sudo(16), headed(20), ssh(30), tailscale(35),
-  docker(40), npmrc(45), host-open(50), clipboard(60), own-modules(70),
-  agent-claude(80), agent-codex(85), agent-cursor(90).
+  + `entrypoint.d/` hooks. Plugins: egress(5), sudo(16), headed(20), ssh(30),
+  tailscale(35), docker(40), npmrc(45), host-open(50), clipboard(60),
+  own-modules(70), agent-claude(80), agent-codex(85), agent-cursor(90).
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
+  egress plugin: `--egress` forces all outbound through a shared, dual-homed
+  ASHP transparent MITM proxy (`ashp.mjs`, lazy-started like the broker; state
+  in `~/claude-sandboxes/.ashp/`); default-deny + per-request approval UI
+  (`vivary egress status|stop|logs`).
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).
@@ -103,6 +107,20 @@ English, converse with the user in Czech.
   `--cap-add` needed). Verified with jiridudekusy/ashp transparent mode: full
   chain works on Apple (dnsmasq :53 catch-all, SNI :443/:80 intercept →
   "Blocked by ASHP" 403, mgmt :3000, CA endpoint) once the sysctl is lowered.
+- ASHP on Apple `container` (egress plugin) needs two more fixes vs Docker,
+  both in the egress `ashp/pre-entrypoint.sh` wrapper (no-ops on Docker):
+  (1) ASHP's stock entrypoint picks dnsmasq listen addrs from `hostname -i`,
+  but Apple writes only the FIRST NIC into /etc/hosts → the vivary-egress NIC
+  is missed and DNS never answers sandboxes; register every global-scope v4
+  addr for the hostname. Also self-pin `ASHP_TRANSPARENT_IP` to the internal
+  NIC (the one NOT carrying the default route) since Apple has an incrementing
+  DHCP pool and no static-IP flag, so the host can't know the IP pre-boot.
+  (2) ASHP's Go transparent proxy resolves the REAL upstream of an *allowed*
+  request via a HARDCODED Docker embedded-DNS addr (`127.0.0.11:53`); on Apple
+  nothing listens there → allowed requests get an empty reply (deny→403 still
+  works, since that path needs no upstream). Fix: run a plain dnsmasq forwarder
+  on `127.0.0.11:53` → the real host nameserver (skip when the real nameserver
+  already IS 127.0.0.11, i.e. Docker). Verified: allow rule → real 200.
 - macOS host: **Norton firewall + Local Network TCC** silently black-hole
   container→host connections (SYN is ACKed by the egress proxy, data dies —
   even closed ports look "open"). User must allow prompts.
