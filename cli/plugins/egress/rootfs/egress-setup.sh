@@ -46,11 +46,18 @@ EOF
 chmod 0644 /etc/profile.d/egress-ca.sh
 
 # ssh / Remote-SSH / Claude Desktop exec sessions read sshd SetEnv, not
-# profile.d — append the CA vars to the sandbox SetEnv line if present.
+# profile.d. sshd is first-match-wins per variable and the ssh plugin already
+# ships a SetEnv line, so a second line would be ignored — EXTEND the existing
+# line in place (idempotent). Runs at 11, before sshd starts at 30, so the
+# edit is in effect on first boot. Falls back to a fresh line if none exists.
 SSHD_CONF=/etc/ssh/sshd_config.d/sandbox.conf
+CA_ENV="NODE_EXTRA_CA_CERTS=${CA_DST} REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
 if [ -f "$SSHD_CONF" ] && ! grep -q "NODE_EXTRA_CA_CERTS" "$SSHD_CONF"; then
-    printf 'SetEnv NODE_EXTRA_CA_CERTS=%s REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n' \
-        "$CA_DST" >> "$SSHD_CONF"
+    if grep -q '^SetEnv ' "$SSHD_CONF"; then
+        sed -i "s#^SetEnv \(.*\)#SetEnv \1 ${CA_ENV}#" "$SSHD_CONF"
+    else
+        echo "SetEnv ${CA_ENV}" >> "$SSHD_CONF"
+    fi
 fi
 
 # 3) Register this sandbox's vivary-egress IP with ASHP so transparent mode
