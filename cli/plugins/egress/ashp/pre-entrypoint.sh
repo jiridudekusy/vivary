@@ -32,4 +32,18 @@ if [ -z "${ASHP_TRANSPARENT_IP:-}" ]; then
     fi
 fi
 
+# 4. ASHP's transparent proxy resolves the REAL upstream of an allowed request
+#    via a hardcoded Docker embedded-DNS address (127.0.0.11:53). Apple
+#    `container` has no such server, so allowed requests fail to resolve their
+#    destination and the client gets an empty reply. Stand up a plain forwarder
+#    on 127.0.0.11:53 -> the real host nameserver. On Docker the real
+#    nameserver already IS 127.0.0.11 (embedded DNS), so we skip it there.
+real_ns="$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)"
+if [ -n "$real_ns" ] && [ "$real_ns" != "127.0.0.11" ]; then
+    dnsmasq --listen-address=127.0.0.11 --bind-interfaces --no-resolv --no-hosts \
+        --server="$real_ns" --pid-file=/tmp/vivary-upstream-dns.pid \
+        && echo "vivary: upstream DNS forwarder 127.0.0.11:53 -> $real_ns" \
+        || echo "WARNING: could not start upstream DNS forwarder on 127.0.0.11" >&2
+fi
+
 exec /app/entrypoint.sh "$@"
