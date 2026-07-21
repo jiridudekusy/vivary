@@ -15,7 +15,10 @@ fi
 #    --add-host flag. Map it to the default gateway (= the host). Checked via
 #    getent, NOT /etc/hosts: under Docker the name resolves through the
 #    embedded DNS and an /etc/hosts entry would shadow that working mapping.
-if ! getent hosts host.docker.internal >/dev/null 2>&1; then
+#    RES_OPTIONS bounds the probe: on an egress sandbox no DNS answers at this
+#    point (internal net, ASHP DNS is set by the NEXT hook), and unbounded
+#    glibc timeouts stall boot for ~40s. Answering resolvers reply in ms.
+if ! RES_OPTIONS="timeout:1 attempts:1" getent hosts host.docker.internal >/dev/null 2>&1; then
     gw="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
     # fallback for images without iproute2: the nameserver is the gateway
     [ -z "$gw" ] && gw="$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf 2>/dev/null)"
