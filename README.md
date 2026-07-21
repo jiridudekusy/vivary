@@ -88,6 +88,21 @@ token-authenticated and logged to `~/claude-sandboxes/.broker/broker.log`.
 This is a deliberate, narrowly-scoped hole in the sandbox — enable per
 sandbox only when you want it.
 
+Because the agent controls the workspace, the broker is defensive about
+what it hands to the host:
+
+- **URLs**: loopback/private/link-local hosts are refused (no using the
+  host browser to reach the broker itself, dev servers, router admin or
+  cloud metadata). Optional per-sandbox allow-list of public domains via
+  `"hostOpenDomains": ["example.com", ...]` in `sandbox.json` (subdomains
+  included; empty/absent = any public host).
+- **Files opened with the host's default app** (`open`, not `code`) are
+  limited to safe document/media types (pdf, office, images, text, av);
+  directories/bundles (`.app`, …) and files with the execute bit are
+  refused, so a workspace `.command`/`.app`/`.pkg` can't launch on the
+  host. Extend the type list with `"hostOpenExtensions": ["ext", ...]`.
+  Opening in the editor (`code <file>`) is always allowed (it only edits).
+
 **OAuth login just works with `--host-open`**: `claude /login` (and `codex
 login`) run their callback server on the *container's* localhost while the
 browser opens on the *host*. The broker detects `redirect_uri=

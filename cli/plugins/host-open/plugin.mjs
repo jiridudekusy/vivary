@@ -69,6 +69,79 @@ function maybeRelayOauthCallback(target, cfg) {
   }
 }
 
+// --- URL safety ---------------------------------------------------------------
+// Never let the sandbox drive the host browser to loopback/LAN targets: it
+// would turn the browser into a proxy to host-only services (the broker on
+// 127.0.0.1, dev servers, router admin, 169.254.169.254 cloud metadata).
+// Literal host/IP only — DNS names that resolve to private space (rebinding)
+// are out of scope; the OAuth relay handles the legitimate localhost case.
+export function isPrivateHost(host) {
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  const h = host.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  if (h === '::1') return true;
+  if (/^fe80:/i.test(h) || /^f[cd][0-9a-f]{2}:/i.test(h)) return true; // link-local / ULA
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = Number(m[1]); const b = Number(m[2]);
+    if (a === 0 || a === 127) return true;                 // this-host / loopback
+    if (a === 10) return true;                             // private
+    if (a === 172 && b >= 16 && b <= 31) return true;      // private
+    if (a === 192 && b === 168) return true;               // private
+    if (a === 169 && b === 254) return true;               // link-local + metadata
+  }
+  return false;
+}
+
+// Optional per-sandbox allow-list in sandbox.json ("hostOpenDomains": [...]).
+// Empty/absent => any public host allowed (still minus isPrivateHost).
+export function domainAllowed(host, cfg) {
+  const allow = Array.isArray(cfg.hostOpenDomains) ? cfg.hostOpenDomains : [];
+  if (!allow.length) return true;
+  return allow.some((d) => {
+    const dom = String(d).toLowerCase().replace(/^\.+/, '');
+    return host === dom || host.endsWith('.' + dom);
+  });
+}
+
+// --- path safety --------------------------------------------------------------
+// via=default routes a workspace file to the host's LaunchServices default
+// app. The agent controls workspace contents, so the containment check alone
+// is not enough: `open` on a .app/.command/.pkg/.webloc launches software on
+// the host. Default-deny by extension (safe document/media types only), and
+// reject bundles (directories) and anything with the exec bit set.
+const SAFE_EXTS = new Set([
+  // documents
+  'pdf', 'doc', 'docx', 'rtf', 'odt', 'pages', 'txt', 'md', 'markdown', 'log',
+  'csv', 'tsv', 'xls', 'xlsx', 'ods', 'numbers', 'ppt', 'pptx', 'odp', 'key',
+  // data / markup (html/svg open in a browser, which sandboxes their scripts)
+  'json', 'xml', 'yaml', 'yml', 'html', 'htm',
+  // images
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'heic', 'svg',
+  // audio / video (non-executing viewers: QuickTime/Music/Preview)
+  'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'mp4', 'm4v', 'mov', 'avi', 'mkv', 'webm',
+]);
+
+export function pathSafeToDefaultOpen(real, cfg) {
+  let st;
+  try {
+    st = fs.lstatSync(real);
+  } catch {
+    return 'path not found on host';
+  }
+  // Bundles (.app/.workflow/.rtfd/.scptd) are directories — never launch one.
+  if (st.isDirectory()) return 'refusing to open a directory/bundle with the default app';
+  if (st.isSymbolicLink()) return 'refusing to open a symlink with the default app';
+  if ((st.mode & 0o111) !== 0) return 'refusing to open an executable file with the default app';
+  const ext = path.extname(real).slice(1).toLowerCase();
+  const extra = Array.isArray(cfg.hostOpenExtensions)
+    ? cfg.hostOpenExtensions.map((e) => String(e).replace(/^\.+/, '').toLowerCase())
+    : [];
+  if (!ext || !(SAFE_EXTS.has(ext) || extra.includes(ext))) {
+    return `file type not allowed for default-open (.${ext || 'none'}) — use \`code <file>\` to edit, or add it to hostOpenExtensions in sandbox.json`;
+  }
+  return null;
+}
+
 // --- open on host ---------------------------------------------------------------
 function openOnHost(action, target, cfg, via) {
   if (action === 'url') {
@@ -79,6 +152,9 @@ function openOnHost(action, target, cfg, via) {
       return 'invalid url';
     }
     if (!['http:', 'https:'].includes(u.protocol)) return `scheme not allowed: ${u.protocol}`;
+    const host = u.hostname.toLowerCase();
+    if (isPrivateHost(host)) return `host not allowed (loopback/private/link-local): ${host}`;
+    if (!domainAllowed(host, cfg)) return `domain not in this sandbox's allow-list: ${host}`;
     maybeRelayOauthCallback(target, cfg);
     const cmd = process.platform === 'darwin' ? ['open', target]
       : process.platform === 'win32' ? ['cmd', '/c', 'start', '', target]
@@ -95,11 +171,15 @@ function openOnHost(action, target, cfg, via) {
     }
     const ok = allowedWorkspaces().some((w) => real === w || real.startsWith(w + path.sep));
     if (!ok) return 'path outside sandbox workspaces';
-    // via=editor (`code file`) opens in the editor; via=default (`open`,
-    // `xdg-open`) uses the host's default application for the file type.
+    // via=editor (`code file`) only ever opens the file for editing — safe.
+    // via=default uses the host's default app, gated by pathSafeToDefaultOpen.
     if (via === 'editor' && hasCmd('code')) {
       spawnSync('code', [real], { stdio: 'ignore' });
-    } else if (process.platform === 'darwin') {
+      return null;
+    }
+    const unsafe = pathSafeToDefaultOpen(real, cfg);
+    if (unsafe) return unsafe;
+    if (process.platform === 'darwin') {
       spawnSync('open', [real], { stdio: 'ignore' });
     } else if (process.platform === 'win32') {
       spawnSync('cmd', ['/c', 'start', '', real], { stdio: 'ignore' });
@@ -121,7 +201,7 @@ export default {
       type: 'boolean',
       sticky: true,
       cfgKey: 'hostOpen',
-      help: 'URLs open in the HOST browser, workspace files in the\nHOST editor (xdg-open/open/code inside forward to the\nvivary broker; sticky). OAuth logins work: localhost\ncallbacks are relayed from the host into the sandbox.',
+      help: 'URLs open in the HOST browser, workspace files in the\nHOST editor (xdg-open/open/code inside forward to the\nvivary broker; sticky). OAuth logins work: localhost\ncallbacks are relayed from the host into the sandbox.\nSafety: loopback/private URLs are refused; default-app\nopen is limited to safe document/media types. Optional\nsandbox.json keys: "hostOpenDomains" (URL allow-list),\n"hostOpenExtensions" (extra default-open file types).',
     },
   },
   needsBroker: (cfg) => !!cfg.hostOpen,

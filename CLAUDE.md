@@ -50,6 +50,21 @@ English, converse with the user in Czech.
   (needs `--cap-add ALL`). Chromium spawned via `container exec` renders
   white/corrupt into Xvfb — GUI must run in the main process tree. Default
   VM: 1 GB/4 CPU → vivary defaults 4 GB/4.
+- macOS `InternetSharing` (com.apple.NetworkSharing) is the system daemon
+  behind vmnet: every `container network` create goes through it via sync XPC.
+  A crashed session can wedge it — symptoms: network ops fail with "pending
+  operation" or hang forever, orphan host bridges remain (bridge101… with the
+  nets' subnets), and after any apiserver restart even `container ls` hangs
+  (apiserver blocks on the default-net helper; `launchctl print` shows the
+  service endpoint `active = 0`, `sample` shows vmnet_network_create stuck in
+  XPC). `launchctl kickstart -k …apiserver` KILLS all running containers — the
+  runtime services don't survive it. Recovery: `container system stop` →
+  restart the wedged daemon with `sudo kill -9 $(pgrep -x InternetSharing)`
+  (launchd respawns it clean; `sudo launchctl kickstart -k
+  system/com.apple.NetworkSharing` is REFUSED by SIP — "Operation not
+  permitted while System Integrity Protection is engaged") →
+  `sudo ifconfig bridge10X destroy` for orphans → `container system start`.
+  Network names must be lowercase ([a-z0-9-]).
 - virtiofs: cannot chmod unix sockets (EINVAL) → `~/.claude/remote/run`
   symlinked to VM-local fs (Claude Desktop remote daemon).
   `~/.codex/app-server-control` (Codex app-server control socket — phone/IDE
@@ -60,6 +75,34 @@ English, converse with the user in Czech.
   options → codex dies with EPERM securing the dir → fix-codex-ctl sudo
   helper chowns it to agent at boot.
   Nested mounts avoided via non-nested mount + symlink (host-projects).
+- Apple VM network-device cap: **max 4 NICs per container** (Virtualization.framework;
+  5th `--network` → `VZErrorDomain Code=2 "The number of network devices is
+  greater than the maximum number supported."`). Hard limit — reshapes any
+  hub-and-spoke egress design: a multi-homed hub = 1 upstream NIC + ≤3 internal
+  NICs, i.e. **max 3 isolated per-sandbox egress nets** before the hub must
+  restart onto a fresh set. Docker has no such low cap.
+- Egress isolation on ONE shared `--internal` net (avoids the 4-NIC cap): host
+  reaches any container on the net via the host bridge (`bridge10X`, gateway
+  `.1`) and — key — host-originated traffic arrives at the container's netfilter
+  with **source = gateway `.1`**, while peer containers arrive with their own
+  `.x`. So a per-sandbox ingress firewall gives inter-sandbox isolation without
+  separate nets: `iptables -P INPUT DROP; -A INPUT -i lo -j ACCEPT; -A INPUT -m
+  conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; -A INPUT -s <gw> -j ACCEPT`.
+  Verified: peer→sandbox DROPPED, host→sandbox (ssh) OK, sandbox outbound
+  (egress via ASHP, broker) OK via ESTABLISHED return. Needs CAP_NET_ADMIN
+  (root; `--cap-add ALL` already added when a plugin sets needsCaps). GOTCHA:
+  `iptables` in the image is nf_tables (`iptables-nft`) and its `-vnL`/policy
+  counters + `LOG` target proved unreliable here (0 counts while rules clearly
+  fired) — trust end-to-end curl outcomes, not nft counters, when debugging.
+- Privileged-port bind: Docker defaults `net.ipv4.ip_unprivileged_port_start=0`
+  so non-root can bind :80/:443; Apple `container` leaves it at 1024, so a
+  non-root service (e.g. ASHP's `ashp`-user proxy) fails with `bind:
+  permission denied` on :443. No `--sysctl` flag on Apple `container run`.
+  Fix: a root entrypoint sets `sysctl -w net.ipv4.ip_unprivileged_port_start=0`
+  before dropping privileges (plain root has CAP_NET_ADMIN by default — no
+  `--cap-add` needed). Verified with jiridudekusy/ashp transparent mode: full
+  chain works on Apple (dnsmasq :53 catch-all, SNI :443/:80 intercept →
+  "Blocked by ASHP" 403, mgmt :3000, CA endpoint) once the sysctl is lowered.
 - macOS host: **Norton firewall + Local Network TCC** silently black-hole
   container→host connections (SYN is ACKed by the egress proxy, data dies —
   even closed ports look "open"). User must allow prompts.
@@ -75,6 +118,15 @@ English, converse with the user in Czech.
   host's 127.0.0.1:PORT into the sandbox via `<runtime> exec curl`.
   (Fallback idea if some login lacks redirect_uri: port-diff detection —
   discussed, deliberately not built yet.)
+- host-open is a sandbox-escape surface (agent owns the workspace), so the
+  broker is default-deny on what reaches the host: URLs refuse
+  loopback/private/link-local hosts (+ optional `hostOpenDomains` allow-list
+  in sandbox.json); default-app `open` is allow-listed to safe doc/media
+  extensions and refuses directories/bundles + execute-bit files (else a
+  workspace `.command`/`.app`/`.pkg` would launch on the host). `code <file>`
+  (via=editor) stays unrestricted — it only edits. Pure predicates
+  (isPrivateHost/domainAllowed/pathSafeToDefaultOpen) are exported for tests.
+  NOT covered: DNS names resolving to private IPs (rebinding) — out of scope.
 - inotify race: new dir + immediate file creation misses events →
   modules-watch also handles directory-create events with a settle+rescan.
 - --sudo cannot exceed the HOST user's file rights: on macOS the mount
