@@ -92,6 +92,7 @@ async function prepare(argv, opts = {}) {
   if (project) await approveProjectConfig(cfg, project, dir, saveSandbox);
 
   applyStickyFlags(cfg, cliFlags); // CLI flags stay sticky, as before
+  writeBackCliFlags(cfg, project, cliFlags, stickyFlagNames(), dir, saveSandbox);
 
   // File values override sticky sandbox.json values for this invocation
   // (in-memory; effective.flags already has CLI flags overlaid on top).
@@ -247,3 +248,37 @@ export async function cmdCreate(argv) {
   console.log(`    Start it:  vivary start ${name}`);
 }
 
+// `vivary init` — generate <workspace>/.vivary.json from the sandbox's
+// current effective config (creating the sandbox with defaults when none
+// exists yet) and mark it approved. The intended creation path for the file.
+export async function cmdInit(argv) {
+  const { flags, positionals } = parseArgs(argv, flagSpec());
+  const workspace = path.resolve(flags.workspace || process.cwd());
+  const file = path.join(workspace, PROJECT_CONFIG_NAME);
+  if (fs.existsSync(file)) {
+    die(`${file} already exists — edit it directly; the change is reviewed on the next start`);
+  }
+  const name = resolveName(flags.name || positionals[0], workspace);
+  let cfg = loadSandbox(name);
+  if (!cfg) cfg = await createSandbox(name, workspace, { ...flags, interactive: false });
+  applyStickyFlags(cfg, flags); // CLI flags of this invocation count too
+
+  const fileFlags = {};
+  for (const [flag, def] of Object.entries(pluginFlagDefs())) {
+    if (!def.sticky) continue;
+    const v = cfg[def.cfgKey || flag];
+    if (v) fileFlags[flag] = v; // only enabled features — the file stays minimal
+  }
+  const project = {
+    agent: flags.agent || cfg.agent || 'claude',
+    runtime: flags.runtime || cfg.runtime,
+    memory: flags.memory || process.env.SANDBOX_MEMORY || '4g',
+    cpus: flags.cpus || process.env.SANDBOX_CPUS || '4',
+    flags: fileFlags,
+    ...(fileFlags.egress ? { egress: { presets: [], allow: [] } } : {}),
+  };
+  const raw = JSON.stringify(project, null, 2) + '\n';
+  fs.writeFileSync(file, raw);
+  markApproved(cfg, { file, raw, config: project }, sandboxDir(name), saveSandbox);
+  console.log(`==> Wrote ${file} (approved for sandbox '${name}').`);
+}

@@ -13,7 +13,7 @@ import { loadPlugins, agentRegistry, pluginCommands, pluginHelp } from './core/p
 import { cmdBroker } from './core/broker.mjs';
 import { cmdBuild } from './core/build.mjs';
 import {
-  cmdCreate, cmdDown, cmdList, cmdRm, cmdShell, cmdStart, cmdUp,
+  cmdCreate, cmdDown, cmdInit, cmdList, cmdRm, cmdShell, cmdStart, cmdUp,
 } from './core/lifecycle.mjs';
 
 function help(launchers) {
@@ -32,6 +32,9 @@ Commands:
                        the current directory). Extra args go to the agent.
   create [name]        Create a sandbox explicitly, with an interactive
                        import wizard (MCP servers, skills, settings).
+  init [name]          Write <workspace>/.vivary.json (committable project
+                       config: agent, resources, flags, egress policy) from
+                       the sandbox's current config and mark it approved.
   up [name]            Long-running container with sshd — for Claude Desktop
                        (Code tab -> "+ Add SSH connection"), IDEs, ssh.
   down [name]          Stop the long-running container.
@@ -65,6 +68,9 @@ Examples:
   vivary up && ssh claude-sandbox-myproj # ssh into the sandbox
   vivary ls                              # all sandboxes, both runtimes
 
+Project config: <workspace>/.vivary.json (committable; created by 'vivary
+init', changes are reviewed+approved on start). Global defaults (used only
+without a project file): ~/.vivary/vivary.json.
 State lives in ~/.vivary/<name>/ (login, settings, skills, ssh keys).
 Chat history is shared with the host's ~/.claude/projects — visible from
 host Claude Code and vice versa. See README for details.`;
@@ -100,6 +106,9 @@ async function main() {
       break;
     case 'create':
       await cmdCreate(rest);
+      break;
+    case 'init':
+      await cmdInit(rest);
       break;
     case 'up':
       await cmdUp(rest);
