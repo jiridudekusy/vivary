@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderRunArgs } from '../core/runtimes/container-cli.mjs';
+import { resolveRuntime } from '../core/runtimes/index.mjs';
 
 const baseSpec = {
   name: 'claude-sandbox-demo',
@@ -45,4 +46,20 @@ test('container run argv omits --init and adds --cap-add ALL when capsAll', () =
   assert.ok(!argv.includes('--init'), 'no --init for container');
   const i = argv.indexOf('--cap-add');
   assert.equal(argv[i + 1], 'ALL');
+});
+
+test('resolveRuntime returns a container-cli provider for docker and container', () => {
+  for (const n of ['docker', 'container']) {
+    const rt = resolveRuntime(n);
+    assert.equal(rt.name, n);
+    assert.equal(rt.kind, 'container-cli');
+    assert.equal(typeof rt.run, 'function');
+  }
+});
+
+test('provider.runArgv delegates to the renderer', () => {
+  const rt = resolveRuntime('docker');
+  const argv = rt.runArgv(baseSpec);
+  assert.equal(argv[0], 'run');
+  assert.ok(argv.includes('--init'));
 });

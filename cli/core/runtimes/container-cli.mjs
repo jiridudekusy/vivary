@@ -1,6 +1,9 @@
 // Renders a RunSpec into the docker/Apple-`container` `run` argv. Kept a pure
 // function so it can be regression-tested against the legacy layout.
 
+import { capture, runInherit } from '../util.mjs';
+import { containerName, runningSet } from '../runtime.mjs';
+
 export function renderRunArgs(spec, { runtime }) {
   const argv = ['run'];
   if (spec.rm) argv.push('--rm');
@@ -23,4 +26,31 @@ export function renderRunArgs(spec, { runtime }) {
   argv.push(...(spec.termEnv || []));
   argv.push(spec.image, ...(spec.command || []));
   return argv;
+}
+
+export function makeContainerCliRuntime(name) {
+  return {
+    name,
+    kind: 'container-cli',
+    runArgv(spec) { return renderRunArgs(spec, { runtime: name }); },
+    ensureImage(spec) { return spec.image; },
+    run(spec, { detached = false } = {}) {
+      const argv = renderRunArgs(spec, { runtime: name });
+      if (detached) {
+        const i = argv.indexOf('--rm');
+        argv.splice(i === -1 ? 1 : i + 1, 0, '-d');
+        return capture(name, argv);
+      }
+      return runInherit(name, argv);
+    },
+    exec(cname, argv, { interactive = false, env = [] } = {}) {
+      const a = ['exec', ...(interactive ? ['-it'] : []), ...env, cname, ...argv];
+      return runInherit(name, a);
+    },
+    stop(cname) { return capture(name, ['stop', cname]); },
+    rm(cname) { return capture(name, ['rm', cname]); },
+    isRunning(sandboxName) { return runningSet(name).has(containerName(sandboxName)); },
+    runningSet() { return runningSet(name); },
+    ip() { return null; },
+  };
 }
