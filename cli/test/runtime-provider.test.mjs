@@ -134,3 +134,21 @@ test('buildRunSpec capsAll: false when runtime is docker even with a needsCaps p
   });
   assert.equal(spec.capsAll, false);
 });
+
+test('start-shaped spec renders a run argv ending in image + command', async () => {
+  const ctx = {
+    cfg: { name: 'demo', workspace: '/w/demo', runtime: 'container' },
+    flags: {}, dir: '/state/demo', cname: 'claude-sandbox-demo',
+  };
+  // Hermetic like the buildRunSpec tests above: no loadPlugins(), no real
+  // plugin registry (getPlugins() dies with "plugins not loaded" otherwise).
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: false, image: 'agent-sandbox-agents', command: ['claude'],
+    plugins: fakePlugins, brokerEnv: fakeBrokerEnv,
+  });
+  const argv = renderRunArgs(spec, { runtime: 'container' });
+  assert.equal(argv[0], 'run');
+  assert.equal(argv[argv.length - 2], 'agent-sandbox-agents');
+  assert.equal(argv[argv.length - 1], 'claude');
+  assert.ok(!argv.includes('--init'));   // container
+});

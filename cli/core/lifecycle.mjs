@@ -1,8 +1,10 @@
 // Sandbox lifecycle commands: start/up/down/shell/ls/rm/create.
 import fs from 'node:fs';
 import path from 'node:path';
-import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, capture, die, parseArgs, runInherit, sanitizeName } from './util.mjs';
-import { containerName, isRunning, runningSet, termEnvArgs } from './runtime.mjs';
+import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, die, parseArgs, sanitizeName } from './util.mjs';
+import { containerName, termEnvArgs } from './runtime.mjs';
+import { resolveRuntime } from './runtimes/index.mjs';
+import { buildRunSpec } from './runtimes/spec.mjs';
 import {
   applyStickyFlags, createSandbox, ensureSandbox, listSandboxNames, loadSandbox,
   overlayConfigFlags, resolveName, sandboxDir, saveSandbox,
@@ -34,32 +36,6 @@ function makeCtx(cfg, flags, mode) {
     HOME,
     log: (msg) => console.log(msg),
   };
-}
-
-// Core mounts + plugin runArgs.
-async function runArgs(ctx) {
-  const { cfg, flags, dir } = ctx;
-  const args = [
-    '--name', ctx.cname,
-    '--memory', flags.memory || process.env.SANDBOX_MEMORY || '4g',
-    '--cpus', flags.cpus || process.env.SANDBOX_CPUS || '4',
-    '-v', `${path.join(dir, 'dot-config')}:/home/agent/.config`,
-    '-v', `${cfg.workspace}:${cfg.workspace}`,
-    '-e', `SBX_SANDBOX_NAME=${cfg.name}`,
-    '-w', cfg.workspace,
-  ];
-  if (cfg.runtime === 'docker') args.push('--init');
-  for (const p of getPlugins()) {
-    if (p.runArgs) args.push(...(await p.runArgs(ctx) || []));
-  }
-  args.push(...(await brokerEnvArgs(cfg)));
-  // Apple `container` strips capabilities by default; plugins that need them
-  // (dockerd: NET_ADMIN etc., bind-modules: SYS_ADMIN) declare needsCaps.
-  // The sandbox is its own VM, so this stays contained.
-  if (cfg.runtime !== 'docker' && getPlugins().some((p) => p.needsCaps?.(cfg))) {
-    args.push('--cap-add', 'ALL');
-  }
-  return args;
 }
 
 // Sticky plugin flag names (the only flags that belong in .vivary.json).
@@ -106,7 +82,7 @@ async function prepare(argv, opts = {}) {
     value: effective.egress, enumerable: false, configurable: true,
   });
 
-  // Backfill file-provided scalars where no CLI flag was given (runArgs
+  // Backfill file-provided scalars where no CLI flag was given (buildRunSpec
   // reads memory/cpus from flags; cmdStart reads the agent).
   const flags = { ...cliFlags };
   for (const key of ['agent', 'memory', 'cpus']) {
@@ -122,44 +98,46 @@ export async function cmdStart(argv, forcedAgent) {
   const agent = agents[agentName]
     || die(`unknown agent '${agentName}' (available: ${Object.keys(agents).join(', ')})`);
   const ctx = makeCtx(cfg, flags, 'start');
-
-  if (isRunning(cfg.runtime, cfg.name)) {
+  const rt = resolveRuntime(cfg.runtime);
+  if (rt.isRunning(cfg.name)) {
     console.log(`==> Container already running, attaching (${agent.cmd})...`);
-    process.exit(runInherit(cfg.runtime, [
-      'exec', ...(IS_TTY ? ['-it'] : []), ...termEnvArgs(),
-      ...(await brokerEnvArgs(cfg)), ctx.cname, agent.cmd, ...rest,
-    ]));
+    process.exit(rt.exec(ctx.cname, [agent.cmd, ...rest], {
+      interactive: IS_TTY,
+      env: [...termEnvArgs(), ...(await brokerEnvArgs(cfg))],
+    }));
   }
-
   console.log(`==> Runtime: ${cfg.runtime} | agent: ${agentName} | workspace: ${cfg.workspace}`);
-  const args = ['run', '--rm', ...(IS_TTY ? ['-it'] : []),
-    ...(await runArgs(ctx)), ...termEnvArgs()];
-  args.push(IMAGE, agent.cmd, ...rest);
-  process.exit(runInherit(cfg.runtime, args));
+  const image = rt.ensureImage({ image: IMAGE });
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: IS_TTY, image, command: [agent.cmd, ...rest], termEnv: termEnvArgs(),
+  });
+  process.exit(rt.run(spec));
 }
 
 export async function cmdShell(argv) {
   const { cfg, flags } = await prepare(argv);
   const ctx = makeCtx(cfg, flags, 'shell');
-
-  if (isRunning(cfg.runtime, cfg.name)) {
-    process.exit(runInherit(cfg.runtime, [
-      'exec', ...(IS_TTY ? ['-it'] : []), ...termEnvArgs(),
-      ...(await brokerEnvArgs(cfg)), ctx.cname, 'bash',
-    ]));
+  const rt = resolveRuntime(cfg.runtime);
+  if (rt.isRunning(cfg.name)) {
+    process.exit(rt.exec(ctx.cname, ['bash'], {
+      interactive: IS_TTY,
+      env: [...termEnvArgs(), ...(await brokerEnvArgs(cfg))],
+    }));
   }
 
   console.log(`==> Runtime: ${cfg.runtime} | shell | workspace: ${cfg.workspace}`);
-  const args = ['run', '--rm', ...(IS_TTY ? ['-it'] : []),
-    ...(await runArgs(ctx)), ...termEnvArgs()];
-  process.exit(runInherit(cfg.runtime, [...args, IMAGE, 'bash']));
+  const image = rt.ensureImage({ image: IMAGE });
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: IS_TTY, image, command: ['bash'], termEnv: termEnvArgs(),
+  });
+  process.exit(rt.run(spec));
 }
 
 export async function cmdUp(argv) {
   const { cfg, flags } = await prepare(argv);
   const ctx = makeCtx(cfg, flags, 'up');
-
-  if (isRunning(cfg.runtime, cfg.name)) {
+  const rt = resolveRuntime(cfg.runtime);
+  if (rt.isRunning(cfg.name)) {
     die(`'${ctx.cname}' is already running (stop it with: vivary down ${cfg.name})`);
   }
 
@@ -167,13 +145,15 @@ export async function cmdUp(argv) {
     if (p.preUp) await p.preUp(ctx);
   }
 
-  const args = ['run', '-d', '--rm', ...(await runArgs(ctx))];
+  const image = rt.ensureImage({ image: IMAGE });
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: false, image, command: ['sleep', 'infinity'],
+  });
   for (const p of getPlugins()) {
-    if (p.upArgs) args.push(...(await p.upArgs(ctx) || []));
+    if (p.upArgs) spec.extraArgs.push(...(await p.upArgs(ctx) || []));
   }
 
-  args.push(IMAGE, 'sleep', 'infinity');
-  const r = capture(cfg.runtime, args);
+  const r = rt.run(spec, { detached: true });
   if (r.status !== 0) die(`${cfg.runtime} run failed: ${r.stderr || r.stdout}`);
 
   console.log(`==> Sandbox '${cfg.name}' is up (runtime: ${cfg.runtime})`);
@@ -187,11 +167,12 @@ export function cmdDown(argv) {
   const { flags, positionals } = parseArgs(argv, { name: 'string' });
   const name = flags.name || positionals[0] || sanitizeName(path.basename(process.cwd()));
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
-  if (!isRunning(cfg.runtime, name)) {
+  const rt = resolveRuntime(cfg.runtime);
+  if (!rt.isRunning(name)) {
     console.log(`Sandbox '${name}' is not running.`);
     return;
   }
-  capture(cfg.runtime, ['stop', containerName(name)]);
+  rt.stop(containerName(name));
   console.log(`==> Sandbox '${name}' stopped (state and chats are preserved).`);
 }
 
@@ -201,7 +182,10 @@ export function cmdList() {
     console.log(`No sandboxes in ${SANDBOXES_DIR}`);
     return;
   }
-  const running = { docker: runningSet('docker'), container: runningSet('container') };
+  const running = {
+    docker: resolveRuntime('docker').runningSet(),
+    container: resolveRuntime('container').runningSet(),
+  };
   const rows = [['NAME', 'AGENT', 'RUNTIME', 'STATUS', 'WORKSPACE']];
   for (const name of names.sort()) {
     const cfg = loadSandbox(name);
@@ -220,8 +204,9 @@ export async function cmdRm(argv) {
   const name = flags.name || positionals[0] || sanitizeName(path.basename(process.cwd()));
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
   const cname = containerName(name);
-  if (isRunning(cfg.runtime, name)) capture(cfg.runtime, ['stop', cname]);
-  capture(cfg.runtime, ['rm', cname]);
+  const rt = resolveRuntime(cfg.runtime);
+  if (rt.isRunning(name)) rt.stop(cname);
+  rt.rm(cname);
   console.log(`==> Container removed. Chat history remains in ${path.join(HOME, '.claude/projects')}.`);
   if (flags.purge) {
     // Explicit --purge in a non-interactive context counts as confirmation.
