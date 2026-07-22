@@ -11,8 +11,22 @@ English, converse with the user in Czech.
   (`slaude`=claude, `sodex`=codex, `sursor`=cursor) by argv0.
 - `cli/core/` — util, runtime (docker/apple abstraction), sandbox registry
   (sandbox.json, **sticky flags** as a generic service), lifecycle
-  (start/up/down/shell/ls/rm/create), broker kernel (HTTP, token, audit log —
+  (start/up/down/shell/ls/rm/create/init), config (`.vivary.json` loader +
+  approval gate, see below), broker kernel (HTTP, token, audit log —
   routes come from plugins), build (fat-image composer), plugin loader.
+- Project config: `<workspace>/.vivary.json` (committable; agent, runtime,
+  memory/cpus, sticky `flags`, `egress: {presets, allow}`) — created by
+  `vivary init`, unknown keys die loudly. Global defaults in
+  `~/.vivary/vivary.json` apply ONLY when no project file exists (no
+  merging). Precedence: CLI > project file > global > built-ins; CLI flags
+  that extend the file are written back (union only) and auto-approved.
+  SECURITY: the file is agent-writable, so every content change is gated
+  host-side — sha256 in sandbox.json (`configApproved`) + verbatim copy in
+  `~/.vivary/<name>/vivary-approved.json`, unified diff + [y/N] on TTY,
+  loud death on non-TTY. Egress policy syncs to ASHP as allow rules named
+  `vivary:<sandbox>:<pattern>` (hand-made UI rules never touched); presets
+  in `cli/plugins/egress/presets.mjs` (anthropic/openai/cursor, harvested
+  empirically). Unit tests: `cd cli && npm test` (node --test).
 - `cli/plugins/<name>/` — one feature per plugin: `plugin.mjs` (host side:
   flags, runArgs/upArgs/postUp/onCreate/onPurge, needsBroker/needsCaps,
   broker routes, agents/launchers) + `image.dockerfile` fragment + `rootfs/`
@@ -121,6 +135,14 @@ English, converse with the user in Czech.
   works, since that path needs no upstream). Fix: run a plain dnsmasq forwarder
   on `127.0.0.11:53` → the real host nameserver (skip when the real nameserver
   already IS 127.0.0.11, i.e. Docker). Verified: allow rule → real 200.
+- ASHP rule-scoping + protocol limits (verified 2026-07-22): the Go proxy
+  IGNORES a rule's `agent_id` — plain rules are effectively GLOBAL across all
+  agents (per-agent scoping exists only via policies, and the flat
+  rules.reload fired on every rule mutation overrides the per-agent map
+  anyway). And upstream is HTTP/1.1-only: h2-only backends fail (cursor's
+  `agentn.global.api5.cursor.sh` closes h1 connections → cursor-agent can't
+  round-trip through ASHP at all) and WebSocket upgrades die in the MITM
+  (codex falls back to HTTPS by itself after ~15 s of wss retries).
 - macOS host: **Norton firewall + Local Network TCC** silently black-hole
   container→host connections (SYN is ACKed by the egress proxy, data dies —
   even closed ports look "open"). User must allow prompts.
@@ -173,8 +195,10 @@ English, converse with the user in Czech.
   restart sshd (asked for iPad/iPhone access).
 - Remote broker for headless-server topology (host-open/clipboard should
   target the CLIENT machine over tailnet, not the server).
-- Network egress policy (default-deny + allow-list à la NVIDIA OpenShell) —
-  biggest remaining security gap; agreed as worthwhile.
+- Network egress policy: DONE via egress plugin + `.vivary.json` presets/
+  allow. Remaining: ASHP ignores rule agent_id (allow rules are global
+  across sandboxes) and speaks only HTTP/1.1 upstream (h2-only backends
+  like cursor's api5 and wss transports fail) — both need ASHP-side work.
 - Windows host support (core/runtime layer is prepared; untested).
 - External plugins from `~/.vivary/plugins/` (loader designed for it).
 

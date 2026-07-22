@@ -29,6 +29,8 @@ vivary start | run [name]   start an interactive agent session — auto-creates 
                          extra args are passed to the agent
 vivary create [name]        explicit create with an interactive import wizard
                          (MCP servers, skills, settings)
+vivary init [name]          write <workspace>/.vivary.json (committable project
+                         config) from the sandbox's current config, approved
 vivary up [name]            long-running container with sshd (Claude Desktop, IDEs)
 vivary down [name]          stop the long-running container
 vivary ls                   list sandboxes across both runtimes
@@ -54,6 +56,41 @@ docker|container`, `--name`, `--workspace`, `--agent`. Environment defaults:
 `$SANDBOX_RUNTIME`, else autodetect — `container` wins if installed) and
 stored in the sandbox config; `start`/`up` always use the stored runtime.
 `vivary ls` shows sandboxes of both runtimes side by side.
+
+## Project config (`.vivary.json`)
+
+A committable `<workspace>/.vivary.json` holds the full sandbox
+configuration — create it with `vivary init`:
+
+```json
+{
+  "agent": "claude",
+  "memory": "8g",
+  "cpus": "6",
+  "flags": { "egress": true, "host-open": true },
+  "egress": {
+    "presets": ["anthropic"],
+    "allow": ["https://registry.npmjs.org/*"]
+  }
+}
+```
+
+Precedence: CLI flags > `.vivary.json` > `~/.vivary/vivary.json` (global
+defaults, used **only** when no project file exists — the two never merge) >
+built-ins. CLI flags that extend the file are written back (union only —
+nothing is ever removed). Unknown keys fail loudly.
+
+Because the agent inside the sandbox can edit the file, every content change
+must be approved: `start`/`up`/`shell` show a diff against the last approved
+copy and ask `[y/N]` (non-interactive runs refuse). Nothing inside the
+sandbox can approve.
+
+With `flags.egress`, the `egress` section is synced to the ASHP proxy as
+allow rules (named `vivary:<sandbox>:…`; rules made by hand in the policy UI
+are never touched). Built-in presets: `anthropic`, `openai`, `cursor` — the
+minimal domains each agent needs for login + prompts (see
+`cli/plugins/egress/presets.mjs` for the empirically verified lists and
+caveats).
 
 ## Image
 
