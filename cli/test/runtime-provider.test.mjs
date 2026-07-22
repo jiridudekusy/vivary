@@ -49,6 +49,46 @@ test('container run argv omits --init and adds --cap-add ALL when capsAll', () =
   assert.equal(argv[i + 1], 'ALL');
 });
 
+// Full argv order for the Apple `container` layout, derived from the
+// pre-refactor `runArgs()` in `git show 04e3085:cli/core/lifecycle.mjs`
+// (the legacy source of truth, not the renderer under test): container gets
+// NO `--init` (only docker needs it for signal reaping), and `--cap-add ALL`
+// is appended after plugin/broker extraArgs and before termEnv — legacy built
+// it the same way, since `runArgs()` pushed `--cap-add ALL` only after the
+// plugin-runArgs/brokerEnvArgs loop, and callers appended termEnvArgs() last.
+test('container run argv matches the legacy layout (full order)', () => {
+  const argv = renderRunArgs({ ...baseSpec, init: false, capsAll: true }, { runtime: 'container' });
+  assert.deepEqual(argv, [
+    'run', '--rm', '-it',
+    '--name', 'claude-sandbox-demo',
+    '--memory', '4g',
+    '--cpus', '4',
+    '-v', '/Users/jdk/.vivary/demo/dot-config:/home/agent/.config',
+    '-v', '/Users/jdk/work/demo:/Users/jdk/work/demo',
+    '-e', 'SBX_SANDBOX_NAME=demo',
+    '-w', '/Users/jdk/work/demo',
+    // no --init here (container)
+    '-e', 'SBX_OPEN_URL=http://host.docker.internal:7377/',
+    '--cap-add', 'ALL',
+    '-e', 'TERM=xterm-256color', '-e', 'COLORTERM=truecolor',
+    'agent-sandbox-agents', 'claude',
+  ]);
+});
+
+test('a ro mount renders host:guest:ro', () => {
+  const argv = renderRunArgs({
+    ...baseSpec,
+    mounts: [{ host: '/Users/jdk/work/demo', guest: '/workspace', ro: true }],
+  }, { runtime: 'docker' });
+  assert.ok(argv.includes('-v'));
+  assert.ok(argv.includes('/Users/jdk/work/demo:/workspace:ro'));
+});
+
+test('capsAll on docker renders no --cap-add (docker guard)', () => {
+  const argv = renderRunArgs({ ...baseSpec, capsAll: true }, { runtime: 'docker' });
+  assert.ok(!argv.includes('--cap-add'), 'docker must never get --cap-add');
+});
+
 test('resolveRuntime returns a container-cli provider for docker and container', () => {
   for (const n of ['docker', 'container']) {
     const rt = resolveRuntime(n);
@@ -105,6 +145,27 @@ test('buildRunSpec extraArgs: plugin runArgs (in order) then brokerEnv', async (
     plugins: fakePlugins, brokerEnv: fakeBrokerEnv,
   });
   assert.deepEqual(spec.extraArgs, ['-v', 'plug:/plug', '-e', 'SBX_OPEN_URL=http://x/']);
+});
+
+test('buildRunSpec extraArgs: multiple runArgs-plugins concatenate in array order, then brokerEnv', async () => {
+  const ctx = {
+    cfg: { name: 'demo', workspace: '/w/demo', runtime: 'docker' },
+    flags: {},
+    dir: '/vivary/demo',
+    cname: 'claude-sandbox-demo',
+  };
+  const multiPlugins = [
+    { runArgs: () => ['-v', 'a:a'] },
+    { runArgs: () => ['-v', 'b:b'] },
+    { needsCaps: () => true },
+  ];
+  const brokerOut = ['-e', 'SBX_OPEN_URL=http://y/'];
+  const fakeBrokerEnv2 = async () => brokerOut;
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: false, image: 'img', command: ['bash'],
+    plugins: multiPlugins, brokerEnv: fakeBrokerEnv2,
+  });
+  assert.deepEqual(spec.extraArgs, ['-v', 'a:a', '-v', 'b:b', ...brokerOut]);
 });
 
 test('buildRunSpec capsAll: true for non-docker runtime with a needsCaps plugin', async () => {

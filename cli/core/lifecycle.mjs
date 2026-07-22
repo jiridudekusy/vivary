@@ -149,6 +149,9 @@ export async function cmdUp(argv) {
   const spec = await buildRunSpec(ctx, {
     rm: true, interactive: false, image, command: ['sleep', 'infinity'],
   });
+  // Legacy appended --cap-add ALL before upArgs; here upArgs land in extraArgs and
+  // cap-add renders after them. Inert: run flags are position-independent for
+  // docker and Apple container, and no upArgs plugin emits caps.
   for (const p of getPlugins()) {
     if (p.upArgs) spec.extraArgs.push(...(await p.upArgs(ctx) || []));
   }
