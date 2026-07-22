@@ -5,7 +5,7 @@
 // deny requests in ASHP's policy UI. Inter-sandbox isolation comes from an
 // ingress firewall raised inside each sandbox (egress-setup helper): host
 // traffic arrives as gateway .1 and is allowed, peer sandboxes are dropped.
-import { cmdEgress, ensureAgent, ensureAshp, purgeAgentToken, syncAgentRules, EGRESS_NET } from './ashp.mjs';
+import { cmdEgress, ensureAgent, ensureAshp, purgeAgent, syncAgentRules, EGRESS_NET } from './ashp.mjs';
 import { expandPresets } from './presets.mjs';
 
 export default {
@@ -56,7 +56,7 @@ export default {
     ];
   },
 
-  onPurge(name) {
-    purgeAgentToken(name);
+  async onPurge(name) {
+    await purgeAgent(name);
   },
 };

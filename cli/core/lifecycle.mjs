@@ -231,7 +231,7 @@ export async function cmdRm(argv) {
     if (/^y/i.test(answer)) {
       fs.rmSync(sandboxDir(name), { recursive: true, force: true });
       for (const p of getPlugins()) {
-        if (p.onPurge) p.onPurge(name);
+        if (p.onPurge) await p.onPurge(name);
       }
       console.log('==> Sandbox state purged.');
     }

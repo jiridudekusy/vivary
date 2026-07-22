@@ -235,17 +235,29 @@ export async function ensureAshp(runtime) {
 
 // --- per-sandbox agent identity -------------------------------------------------
 
-async function mgmt(ip, adminPassword, method, route, body) {
-  const res = await fetch(`http://${ip}:${MGMT_PORT}/api${route}`, {
-    method,
-    headers: {
-      authorization: 'Basic ' + Buffer.from(`admin:${adminPassword}`).toString('base64'),
-      'content-type': 'application/json',
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) die(`ASHP API ${method} ${route} failed: HTTP ${res.status} ${await res.text()}`);
+// `soft: true` turns failures (network or non-2xx) into a null return instead
+// of a fatal die — for best-effort paths like purge cleanup, where one failed
+// call must not abort the surrounding operation.
+async function mgmt(ip, adminPassword, method, route, body, { soft = false } = {}) {
+  let res;
+  try {
+    res = await fetch(`http://${ip}:${MGMT_PORT}/api${route}`, {
+      method,
+      headers: {
+        authorization: 'Basic ' + Buffer.from(`admin:${adminPassword}`).toString('base64'),
+        'content-type': 'application/json',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    if (soft) return null;
+    die(`ASHP API ${method} ${route} failed: ${e.message}`);
+  }
+  if (!res.ok) {
+    if (soft) return null;
+    die(`ASHP API ${method} ${route} failed: HTTP ${res.status} ${await res.text()}`);
+  }
   return res.status === 204 ? null : res.json();
 }
 
@@ -269,10 +281,29 @@ export async function ensureAgent(ip, adminPassword, name) {
   return created.token;
 }
 
-// Purge hook: drop the persisted token; the ASHP agent record (and its audit
-// trail) is kept on purpose — delete it in the policy UI if unwanted.
-export function purgeAgentToken(name) {
+// Purge hook: drop the persisted token AND, when ASHP is reachable, delete the
+// sandbox's managed allow rules (`vivary:<name>:`) and its ASHP agent record.
+// Best-effort — a down/unhealthy ASHP or a failing call never aborts the purge
+// (the token file, the host-side secret, is always removed). Cleaning the rules
+// matters for correctness AND security: ASHP currently applies allow rules
+// globally (ignores agent_id, see syncAgentRules), so a purged sandbox's rules
+// would otherwise keep whitelisting hosts for every other egress sandbox, and a
+// reused name would inherit never-approved rules.
+export async function purgeAgent(name, runtime) {
   fs.rmSync(path.join(ASHP_DIR, 'agents', name), { force: true });
+  runtime = runtime || detectRuntime();
+  if (!ashpRunning(runtime)) return;
+  const ip = ashpEgressIp(runtime);
+  if (!ip || !(await ashpHealthy(ip))) return;
+  const { adminPassword } = ensureSecrets();
+  const prefix = `vivary:${name}:`;
+  const rules = await mgmt(ip, adminPassword, 'GET', '/rules', undefined, { soft: true });
+  for (const r of (rules || []).filter((r) => (r.name || '').startsWith(prefix))) {
+    await mgmt(ip, adminPassword, 'DELETE', `/rules/${r.id}`, undefined, { soft: true });
+  }
+  const agents = await mgmt(ip, adminPassword, 'GET', '/agents', undefined, { soft: true });
+  const agent = (agents || []).find((a) => a.name === name);
+  if (agent) await mgmt(ip, adminPassword, 'DELETE', `/agents/${agent.id}`, undefined, { soft: true });
 }
 
 // --- config-driven rule sync ------------------------------------------------------
