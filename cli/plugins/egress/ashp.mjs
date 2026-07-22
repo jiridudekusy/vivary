@@ -246,7 +246,7 @@ async function mgmt(ip, adminPassword, method, route, body) {
     signal: AbortSignal.timeout(5000),
   });
   if (!res.ok) die(`ASHP API ${method} ${route} failed: HTTP ${res.status} ${await res.text()}`);
-  return res.json();
+  return res.status === 204 ? null : res.json();
 }
 
 // Each egress sandbox is one ASHP agent (name = sandbox name, own token).
@@ -273,6 +273,56 @@ export async function ensureAgent(ip, adminPassword, name) {
 // trail) is kept on purpose — delete it in the policy UI if unwanted.
 export function purgeAgentToken(name) {
   fs.rmSync(path.join(ASHP_DIR, 'agents', name), { force: true });
+}
+
+// --- config-driven rule sync ------------------------------------------------------
+
+// Sync vivary-managed allow rules for one sandbox with the effective egress
+// policy (.vivary.json presets + allow). Managed rules are identified by the
+// name prefix `vivary:<sandbox>:` and carry the sandbox agent's id; rules
+// without the prefix (hand-made in the policy UI) are NEVER touched.
+// Empty pattern list -> all managed rules for the sandbox are removed
+// (deny-all default, approval via the UI as before).
+//
+// GOTCHA (verified 2026-07-22): ASHP's Go proxy currently ignores a rule's
+// agent_id during matching — plain rules are effectively GLOBAL (a second
+// sandbox passed through another sandbox's allow rule). Per-agent
+// enforcement in ASHP works only via policies, and its flat rules.reload
+// (fired on every rule mutation) overrides the per-agent map anyway. We
+// still set agent_id (bookkeeping + forward compat), but do not promise
+// isolation between egress sandboxes' allow lists until ASHP scopes rules.
+export async function syncAgentRules(ip, adminPassword, sandbox, patterns) {
+  const prefix = `vivary:${sandbox}:`;
+  const desired = [...new Set(patterns)];
+  const agents = await mgmt(ip, adminPassword, 'GET', '/agents');
+  const agent = agents.find((a) => a.name === sandbox)
+    || die(`egress rule sync: ASHP agent '${sandbox}' not found`);
+  const rules = await mgmt(ip, adminPassword, 'GET', '/rules');
+  const mine = rules.filter((r) => (r.name || '').startsWith(prefix));
+
+  const wanted = new Set(desired);
+  let removed = 0;
+  for (const rule of mine) {
+    if (!wanted.has(rule.url_pattern)) {
+      await mgmt(ip, adminPassword, 'DELETE', `/rules/${rule.id}`);
+      removed += 1;
+    }
+  }
+  const have = new Set(mine.map((r) => r.url_pattern));
+  let created = 0;
+  for (const pattern of desired) {
+    if (have.has(pattern)) continue;
+    await mgmt(ip, adminPassword, 'POST', '/rules', {
+      name: prefix + pattern,
+      url_pattern: pattern,
+      action: 'allow',
+      agent_id: String(agent.id),
+    });
+    created += 1;
+  }
+  if (created || removed) {
+    console.log(`==> egress: policy synced for '${sandbox}' — ${desired.length} allow rule(s) (+${created}/−${removed})`);
+  }
 }
 
 // --- `vivary egress` subcommand -------------------------------------------------

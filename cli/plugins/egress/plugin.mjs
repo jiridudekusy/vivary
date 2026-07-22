@@ -5,7 +5,8 @@
 // deny requests in ASHP's policy UI. Inter-sandbox isolation comes from an
 // ingress firewall raised inside each sandbox (egress-setup helper): host
 // traffic arrives as gateway .1 and is allowed, peer sandboxes are dropped.
-import { cmdEgress, ensureAgent, ensureAshp, purgeAgentToken, EGRESS_NET } from './ashp.mjs';
+import { cmdEgress, ensureAgent, ensureAshp, purgeAgentToken, syncAgentRules, EGRESS_NET } from './ashp.mjs';
+import { expandPresets } from './presets.mjs';
 
 export default {
   name: 'egress',
@@ -31,6 +32,12 @@ export default {
     if (!cfg.egress) return [];
     const { ip, adminPassword } = await ensureAshp(cfg.runtime);
     const token = await ensureAgent(ip, adminPassword, cfg.name);
+    // Approved .vivary.json egress policy (presets + allow) -> ASHP rules.
+    // No policy (no file / no egress section) -> sync to empty, which drops
+    // stale vivary-managed rules and leaves deny-all + UI approval.
+    const policy = cfg.egressPolicy || {};
+    const patterns = [...expandPresets(policy.presets), ...(policy.allow || [])];
+    await syncAgentRules(ip, adminPassword, cfg.name, patterns);
     log(`==> egress: outbound via ASHP at ${ip} (policy UI: http://${ip}:3000/)`);
     return [
       '--network', EGRESS_NET,
