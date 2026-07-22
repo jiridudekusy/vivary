@@ -2,14 +2,17 @@ import path from 'node:path';
 import { getPlugins } from '../plugins.mjs';
 import { brokerEnvArgs } from '../broker.mjs';
 
-export async function buildRunSpec(ctx, { rm, interactive, image, command = [], termEnv = [] }) {
+export async function buildRunSpec(ctx, {
+  rm, interactive, image, command = [], termEnv = [],
+  plugins = getPlugins(), brokerEnv = brokerEnvArgs,
+} = {}) {
   const { cfg, flags, dir } = ctx;
   const runtime = cfg.runtime;
   const extraArgs = [];
-  for (const p of getPlugins()) {
+  for (const p of plugins) {
     if (p.runArgs) extraArgs.push(...(await p.runArgs(ctx) || []));
   }
-  extraArgs.push(...(await brokerEnvArgs(cfg)));
+  extraArgs.push(...(await brokerEnv(cfg)));
   return {
     name: ctx.cname,
     image,
@@ -23,7 +26,7 @@ export async function buildRunSpec(ctx, { rm, interactive, image, command = [], 
     ],
     env: { SBX_SANDBOX_NAME: cfg.name },
     init: runtime === 'docker',
-    capsAll: runtime !== 'docker' && getPlugins().some((p) => p.needsCaps?.(cfg)),
+    capsAll: runtime !== 'docker' && plugins.some((p) => p.needsCaps?.(cfg)),
     extraArgs,
     termEnv,
     command,

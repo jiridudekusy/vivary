@@ -1,12 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import { renderRunArgs } from '../core/runtimes/container-cli.mjs';
 import { resolveRuntime } from '../core/runtimes/index.mjs';
 import { buildRunSpec } from '../core/runtimes/spec.mjs';
-import { loadPlugins } from '../core/plugins.mjs';
 
 const baseSpec = {
   name: 'claude-sandbox-demo',
@@ -69,29 +65,72 @@ test('provider.runArgv delegates to the renderer', () => {
   assert.ok(argv.includes('--init'));
 });
 
+// Fake plugins + fake brokerEnv keep this test hermetic: no loadPlugins(),
+// no real plugin registry, no filesystem writes (e.g. agent-claude's
+// projectHistoryMounts mkdir-ing into the real ~/.claude/projects).
+const fakePlugins = [
+  { runArgs: () => ['-v', 'plug:/plug'] },
+  { needsCaps: () => true },
+];
+const fakeBrokerEnv = async () => ['-e', 'SBX_OPEN_URL=http://x/'];
+
 test('buildRunSpec reproduces core mounts, env and cwd', async () => {
-  // Load plugins to allow getPlugins() to work
-  await loadPlugins();
+  const ctx = {
+    cfg: { name: 'demo', workspace: '/w/demo', runtime: 'docker' },
+    flags: { memory: '4g', cpus: '4' },
+    dir: '/vivary/demo',
+    cname: 'claude-sandbox-demo',
+  };
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: false, image: 'img', command: ['bash'],
+    plugins: fakePlugins, brokerEnv: fakeBrokerEnv,
+  });
+  assert.equal(spec.name, 'claude-sandbox-demo');
+  assert.equal(spec.cwd, '/w/demo');
+  assert.deepEqual(spec.env.SBX_SANDBOX_NAME, 'demo');
+  assert.ok(spec.mounts.some((m) => m.guest === '/w/demo' && m.host === '/w/demo'));
+  assert.ok(spec.mounts.some((m) => m.guest === '/home/agent/.config'));
+  assert.equal(spec.init, true);        // docker
+});
 
-  // Create a temporary directory for the test
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vivary-test-'));
+test('buildRunSpec extraArgs: plugin runArgs (in order) then brokerEnv', async () => {
+  const ctx = {
+    cfg: { name: 'demo', workspace: '/w/demo', runtime: 'docker' },
+    flags: {},
+    dir: '/vivary/demo',
+    cname: 'claude-sandbox-demo',
+  };
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: false, image: 'img', command: ['bash'],
+    plugins: fakePlugins, brokerEnv: fakeBrokerEnv,
+  });
+  assert.deepEqual(spec.extraArgs, ['-v', 'plug:/plug', '-e', 'SBX_OPEN_URL=http://x/']);
+});
 
-  try {
-    const ctx = {
-      cfg: { name: 'demo', workspace: '/w/demo', runtime: 'docker' },
-      flags: { memory: '4g', cpus: '4' },
-      dir: tmpDir,
-      cname: 'claude-sandbox-demo',
-    };
-    const spec = await buildRunSpec(ctx, { rm: true, interactive: false, image: 'img', command: ['bash'] });
-    assert.equal(spec.name, 'claude-sandbox-demo');
-    assert.equal(spec.cwd, '/w/demo');
-    assert.deepEqual(spec.env.SBX_SANDBOX_NAME, 'demo');
-    assert.ok(spec.mounts.some((m) => m.guest === '/w/demo' && m.host === '/w/demo'));
-    assert.ok(spec.mounts.some((m) => m.guest === '/home/agent/.config'));
-    assert.equal(spec.init, true);        // docker
-  } finally {
-    // Clean up the temporary directory
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
+test('buildRunSpec capsAll: true for non-docker runtime with a needsCaps plugin', async () => {
+  const ctx = {
+    cfg: { name: 'demo', workspace: '/w/demo', runtime: 'container' },
+    flags: {},
+    dir: '/vivary/demo',
+    cname: 'claude-sandbox-demo',
+  };
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: false, image: 'img', command: ['bash'],
+    plugins: fakePlugins, brokerEnv: fakeBrokerEnv,
+  });
+  assert.equal(spec.capsAll, true);
+});
+
+test('buildRunSpec capsAll: false when runtime is docker even with a needsCaps plugin', async () => {
+  const ctx = {
+    cfg: { name: 'demo', workspace: '/w/demo', runtime: 'docker' },
+    flags: {},
+    dir: '/vivary/demo',
+    cname: 'claude-sandbox-demo',
+  };
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: false, image: 'img', command: ['bash'],
+    plugins: fakePlugins, brokerEnv: fakeBrokerEnv,
+  });
+  assert.equal(spec.capsAll, false);
 });
