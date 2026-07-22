@@ -104,7 +104,7 @@ export default {
       ? (process.env.SSH_PORT || '2222')
       : cfg.tsSshPort;
     ctx.log(`    Tailnet:   ssh -p ${port} agent@${selfFqdn}
-               (identity file: ~/claude-sandboxes/${cfg.name}/ssh/id_ed25519 on this host;
-                copy it to the client, e.g. scp ${selfFqdn}:claude-sandboxes/${cfg.name}/ssh/id_ed25519 .)`);
+               (identity file: ~/.vivary/${cfg.name}/ssh/id_ed25519 on this host;
+                copy it to the client, e.g. scp ${selfFqdn}:.vivary/${cfg.name}/ssh/id_ed25519 .)`);
   },
 };

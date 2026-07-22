@@ -8,7 +8,7 @@
 // flags, container run args, image fragments, entrypoint hooks and broker
 // routes. Agent launchers (slaude, sodex, sursor) dispatch on the binary name.
 import path from 'node:path';
-import { die, parseArgs, pkg } from './core/util.mjs';
+import { die, migrateLegacyHome, parseArgs, pkg } from './core/util.mjs';
 import { loadPlugins, agentRegistry, pluginCommands, pluginHelp } from './core/plugins.mjs';
 import { cmdBroker } from './core/broker.mjs';
 import { cmdBuild } from './core/build.mjs';
@@ -65,12 +65,13 @@ Examples:
   vivary up && ssh claude-sandbox-myproj # ssh into the sandbox
   vivary ls                              # all sandboxes, both runtimes
 
-State lives in ~/claude-sandboxes/<name>/ (login, settings, skills, ssh keys).
+State lives in ~/.vivary/<name>/ (login, settings, skills, ssh keys).
 Chat history is shared with the host's ~/.claude/projects — visible from
 host Claude Code and vice versa. See README for details.`;
 }
 
 async function main() {
+  migrateLegacyHome();
   await loadPlugins();
   const { launchers } = agentRegistry();
 

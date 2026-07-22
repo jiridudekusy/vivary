@@ -22,16 +22,16 @@ English, converse with the user in Czech.
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
   egress plugin: `--egress` forces all outbound through a shared, dual-homed
   ASHP transparent MITM proxy (`ashp.mjs`, lazy-started like the broker; state
-  in `~/claude-sandboxes/.ashp/`); default-deny + per-request approval UI
+  in `~/.vivary/.ashp/`); default-deny + per-request approval UI
   (`vivary egress status|stop|logs`).
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).
 - `vivary build` composes ONE fat image (`agent-sandbox-agents`) from core +
   all plugin fragments; features activate at runtime via env.
-- Per-sandbox state: `~/claude-sandboxes/<name>/` (dot-claude, dot-config,
+- Per-sandbox state: `~/.vivary/<name>/` (dot-claude, dot-config,
   dot-codex, ssh/, modules/, sandbox.json). Broker state:
-  `~/claude-sandboxes/.broker/` (token, log, pid).
+  `~/.vivary/.broker/` (token, log, pid).
 
 ## Key invariants (do not break)
 

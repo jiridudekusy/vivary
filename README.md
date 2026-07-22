@@ -84,7 +84,7 @@ inside the sandbox forward to a small host-side broker (`vivary broker`,
 auto-started) — URLs open in the **host browser** (http/https only; e.g.
 OAuth login flows open automatically via `$BROWSER`), files open in the
 **host editor** (VS Code), restricted to sandbox workspaces. Requests are
-token-authenticated and logged to `~/claude-sandboxes/.broker/broker.log`.
+token-authenticated and logged to `~/.vivary/.broker/broker.log`.
 This is a deliberate, narrowly-scoped hole in the sandbox — enable per
 sandbox only when you want it.
 
@@ -150,7 +150,7 @@ container's /etc/hosts from `tailscale status` at every start. Inbound:
 `vivary up` publishes the sandbox's sshd on a stable per-sandbox port
 (22000+), so any tailnet device reaches it at `<host-magicdns>:<port>` —
 Claude Desktop from your laptop, ssh from an iPad. The identity file lives
-on the container host (`~/claude-sandboxes/<name>/ssh/`); copy it to the
+on the container host (`~/.vivary/<name>/ssh/`); copy it to the
 client once.
 
 **Docker-in-sandbox**: start with `--docker` (sticky per sandbox) and agents
@@ -162,7 +162,7 @@ the sandbox is its own VM, so neither is needed.
 
 ## How host sharing works
 
-Per-sandbox state lives in `~/claude-sandboxes/<name>/`:
+Per-sandbox state lives in `~/.vivary/<name>/`:
 
 | Host path | In container | Purpose |
 |---|---|---|

@@ -3,7 +3,7 @@
 // upstream egress, `vivary-egress` (internal) facing the sandboxes — so it
 // never restarts as sandboxes come and go and never nears Apple's 4-NIC cap.
 //
-// State lives in ~/claude-sandboxes/.ashp/: secrets.json (0600), conf/ashp.json,
+// State lives in ~/.vivary/.ashp/: secrets.json (0600), conf/ashp.json,
 // data/ (SQLCipher db + CA), bin/pre-entrypoint.sh (sysctl wrapper, see
 // ashp/pre-entrypoint.sh), agents/<name> (per-sandbox tokens, 0600).
 import crypto from 'node:crypto';

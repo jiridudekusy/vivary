@@ -7,7 +7,54 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const HOME = os.homedir();
-export const SANDBOXES_DIR = process.env.SANDBOXES_DIR || path.join(HOME, 'claude-sandboxes');
+export const SANDBOXES_DIR = process.env.SANDBOXES_DIR || path.join(HOME, '.vivary');
+const LEGACY_SANDBOXES_DIR = path.join(HOME, 'claude-sandboxes');
+
+// One-time ~/claude-sandboxes -> ~/.vivary migration. Everything inside
+// (.broker, .ashp, per-sandbox dirs) moves with the rename; managed
+// ~/.ssh/config blocks reference identity files under the old path, so they
+// are rewritten in place (only inside vivary/sbx/sandbox.sh marker blocks).
+// Running containers keep their old mounts until restarted — the notice says
+// so. Skipped when SANDBOXES_DIR is overridden via env.
+export function migrateLegacyHome() {
+  if (process.env.SANDBOXES_DIR) return;
+  if (!fs.existsSync(LEGACY_SANDBOXES_DIR)) return;
+  if (fs.existsSync(SANDBOXES_DIR)) {
+    console.error(`WARNING: both ${LEGACY_SANDBOXES_DIR} and ${SANDBOXES_DIR} exist — ` +
+      `using ${SANDBOXES_DIR}, the legacy dir is ignored (merge or remove it manually).`);
+    return;
+  }
+  fs.renameSync(LEGACY_SANDBOXES_DIR, SANDBOXES_DIR);
+  rewriteSshConfigPaths();
+  console.log(`==> Migrated sandbox home: ${LEGACY_SANDBOXES_DIR} -> ${SANDBOXES_DIR}`);
+  console.log('    Running containers keep the old mounts until restarted ' +
+    '(vivary down/up; vivary egress stop for the egress proxy; broker restarts itself).');
+}
+
+// Rewrite legacy identity-file paths inside marker-delimited ~/.ssh/config
+// blocks (the ssh plugin owns the block format; markers match its writers).
+function rewriteSshConfigPaths() {
+  const cfgFile = path.join(HOME, '.ssh/config');
+  if (!fs.existsSync(cfgFile)) return;
+  const lines = fs.readFileSync(cfgFile, 'utf8').split('\n');
+  let inBlock = false;
+  let changed = false;
+  const out = lines.map((line) => {
+    if (/^# >>> claude-sandbox:/.test(line)) inBlock = true;
+    const isEnd = /^# <<< claude-sandbox:/.test(line);
+    let next = line;
+    if (inBlock && line.includes(LEGACY_SANDBOXES_DIR)) {
+      next = line.split(LEGACY_SANDBOXES_DIR).join(SANDBOXES_DIR);
+      changed = true;
+    }
+    if (isEnd) inBlock = false;
+    return next;
+  });
+  if (changed) {
+    fs.writeFileSync(cfgFile, out.join('\n'));
+    console.log('==> Rewrote sandbox identity paths in ~/.ssh/config managed blocks');
+  }
+}
 export const IMAGE = process.env.SANDBOX_IMAGE || 'agent-sandbox-agents';
 export const CLI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const IS_TTY = process.stdin.isTTY && process.stdout.isTTY;
