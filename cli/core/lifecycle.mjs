@@ -3,8 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, capture, die, parseArgs, runInherit, sanitizeName } from './util.mjs';
 import { containerName, isRunning, runningSet, termEnvArgs } from './runtime.mjs';
-import { applyStickyFlags, createSandbox, ensureSandbox, listSandboxNames, loadSandbox, sandboxDir } from './sandbox.mjs';
-import { agentRegistry, getPlugins, pluginFlagSpec } from './plugins.mjs';
+import {
+  applyStickyFlags, createSandbox, ensureSandbox, listSandboxNames, loadSandbox,
+  overlayConfigFlags, resolveName, sandboxDir, saveSandbox,
+} from './sandbox.mjs';
+import { agentRegistry, getPlugins, pluginFlagDefs, pluginFlagSpec } from './plugins.mjs';
+import {
+  PROJECT_CONFIG_NAME, approveProjectConfig, loadGlobalConfig, loadProjectConfig,
+  markApproved, resolveEffectiveConfig, writeBackCliFlags,
+} from './config.mjs';
 import { brokerEnvArgs } from './broker.mjs';
 
 const CORE_FLAGS = {
@@ -55,12 +62,55 @@ async function runArgs(ctx) {
   return args;
 }
 
+// Sticky plugin flag names (the only flags that belong in .vivary.json).
+function stickyFlagNames() {
+  return Object.entries(pluginFlagDefs())
+    .filter(([, def]) => def.sticky).map(([flag]) => flag);
+}
+
 async function prepare(argv, opts = {}) {
-  const { flags, positionals, rest } = parseArgs(argv, flagSpec(), opts);
-  const cfg = await ensureSandbox(flags.name || positionals[0], {
-    ...flags, agent: opts.forcedAgent || flags.agent,
+  const { flags: cliFlags, positionals, rest } = parseArgs(argv, flagSpec(), opts);
+  const workspace = path.resolve(cliFlags.workspace || process.cwd());
+
+  // Config files: project .vivary.json wins entirely over the global
+  // defaults (~/.vivary/vivary.json) — the two never merge. Loading dies
+  // loudly on invalid JSON / unknown keys.
+  const knownFlags = pluginFlagSpec();
+  const project = loadProjectConfig(workspace, knownFlags);
+  const globalCfg = project ? null : loadGlobalConfig(knownFlags);
+  const effective = resolveEffectiveConfig({
+    cliFlags, project: project?.config, global: globalCfg?.config,
   });
-  applyStickyFlags(cfg, flags);
+
+  // The sandbox is created from CLI flags only; file-driven values are
+  // applied AFTER the approval gate, so nothing from an unapproved (agent-
+  // writable) file is ever persisted or acted upon.
+  const cfg = await ensureSandbox(cliFlags.name || positionals[0], {
+    ...cliFlags, agent: opts.forcedAgent || cliFlags.agent,
+  });
+  const dir = sandboxDir(cfg.name);
+  if (project) await approveProjectConfig(cfg, project, dir, saveSandbox);
+
+  applyStickyFlags(cfg, cliFlags); // CLI flags stay sticky, as before
+
+  // File values override sticky sandbox.json values for this invocation
+  // (in-memory; effective.flags already has CLI flags overlaid on top).
+  overlayConfigFlags(cfg, effective.flags);
+  if (effective.runtime && effective.runtime !== cfg.runtime) {
+    cfg.runtime = effective.runtime;
+  }
+  // Egress policy (presets/allow) rides along for the egress plugin —
+  // non-enumerable so no saveSandbox() call can leak it into sandbox.json.
+  Object.defineProperty(cfg, 'egressPolicy', {
+    value: effective.egress, enumerable: false, configurable: true,
+  });
+
+  // Backfill file-provided scalars where no CLI flag was given (runArgs
+  // reads memory/cpus from flags; cmdStart reads the agent).
+  const flags = { ...cliFlags };
+  for (const key of ['agent', 'memory', 'cpus']) {
+    if (flags[key] === undefined && effective[key] !== undefined) flags[key] = effective[key];
+  }
   return { cfg, flags, rest };
 }
 
@@ -196,3 +246,4 @@ export async function cmdCreate(argv) {
   await createSandbox(name, workspace, { ...flags, interactive: true });
   console.log(`    Start it:  vivary start ${name}`);
 }
+

@@ -62,6 +62,15 @@ export function pluginFlagSpec() {
   return spec;
 }
 
+// Full flag definitions by flag name (for config validation/normalization).
+export function pluginFlagDefs() {
+  const defs = {};
+  for (const p of getPlugins()) {
+    for (const [flag, def] of Object.entries(p.flags || {})) defs[flag] = def;
+  }
+  return defs;
+}
+
 // All agents / launchers across plugins.
 export function agentRegistry() {
   const agents = {};

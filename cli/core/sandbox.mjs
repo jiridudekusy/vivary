@@ -89,6 +89,21 @@ export function applyStickyFlags(cfg, flags) {
   if (changed) saveSandbox(cfg);
 }
 
+// In-memory overlay of config-file flags (.vivary.json / global defaults)
+// onto the sandbox config for this invocation. Intentionally NOT persisted:
+// sticky values in sandbox.json only ever come from CLI flags, so removing a
+// flag from the file takes effect on the next run (values may still reach
+// sandbox.json via unrelated saves — e.g. tailscale persisting its port —
+// which is harmless: overlaid values passed the approval gate).
+export function overlayConfigFlags(cfg, fileFlags = {}) {
+  for (const p of getPlugins()) {
+    for (const [flag, def] of Object.entries(p.flags || {})) {
+      if (!def.sticky || fileFlags[flag] === undefined) continue;
+      cfg[def.cfgKey || flag] = normalizeFlag(def, fileFlags[flag]);
+    }
+  }
+}
+
 export async function createSandbox(name, workspace, opts) {
   const dir = sandboxDir(name);
   if (loadSandbox(name)) die(`sandbox '${name}' already exists at ${dir}`);
