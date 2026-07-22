@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { renderRunArgs } from '../core/runtimes/container-cli.mjs';
 import { resolveRuntime } from '../core/runtimes/index.mjs';
+import { buildRunSpec } from '../core/runtimes/spec.mjs';
+import { loadPlugins } from '../core/plugins.mjs';
 
 const baseSpec = {
   name: 'claude-sandbox-demo',
@@ -62,4 +67,31 @@ test('provider.runArgv delegates to the renderer', () => {
   const argv = rt.runArgv(baseSpec);
   assert.equal(argv[0], 'run');
   assert.ok(argv.includes('--init'));
+});
+
+test('buildRunSpec reproduces core mounts, env and cwd', async () => {
+  // Load plugins to allow getPlugins() to work
+  await loadPlugins();
+
+  // Create a temporary directory for the test
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vivary-test-'));
+
+  try {
+    const ctx = {
+      cfg: { name: 'demo', workspace: '/w/demo', runtime: 'docker' },
+      flags: { memory: '4g', cpus: '4' },
+      dir: tmpDir,
+      cname: 'claude-sandbox-demo',
+    };
+    const spec = await buildRunSpec(ctx, { rm: true, interactive: false, image: 'img', command: ['bash'] });
+    assert.equal(spec.name, 'claude-sandbox-demo');
+    assert.equal(spec.cwd, '/w/demo');
+    assert.deepEqual(spec.env.SBX_SANDBOX_NAME, 'demo');
+    assert.ok(spec.mounts.some((m) => m.guest === '/w/demo' && m.host === '/w/demo'));
+    assert.ok(spec.mounts.some((m) => m.guest === '/home/agent/.config'));
+    assert.equal(spec.init, true);        // docker
+  } finally {
+    // Clean up the temporary directory
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
