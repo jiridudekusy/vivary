@@ -152,3 +152,7 @@ test('start-shaped spec renders a run argv ending in image + command', async () 
   assert.equal(argv[argv.length - 1], 'claude');
   assert.ok(!argv.includes('--init'));   // container
 });
+
+test('resolveRuntime(tart) fails with a phase-2 hint, not unknown-runtime', () => {
+  assert.throws(() => resolveRuntime('tart'), /Phase 2|not yet/i);
+});
