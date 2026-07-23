@@ -214,8 +214,11 @@ test('start-shaped spec renders a run argv ending in image + command', async () 
   assert.ok(!argv.includes('--init'));   // container
 });
 
-test('resolveRuntime(tart) fails with a phase-2 hint, not unknown-runtime', () => {
-  assert.throws(() => resolveRuntime('tart'), /Phase 2|not yet/i);
+test('resolveRuntime(tart) returns the vm-tart provider', () => {
+  const rt = resolveRuntime('tart');
+  assert.equal(rt.name, 'tart');
+  assert.equal(rt.kind, 'vm-tart');
+  assert.equal(rt.instanceName('demo'), 'vivary-demo');
 });
 
 test('renderExecArgs reproduces the legacy attach argv (env object -> -e pairs)', () => {
