@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  SANDBOXES_DIR, capture as realCapture, hasCmd, runInherit as realRunInherit,
+  SANDBOXES_DIR, capture as realCapture, hasCmd as realHasCmd, runInherit as realRunInherit,
 } from '../util.mjs';
 
 export function tartVmName(sandboxName) {
@@ -130,6 +130,7 @@ export function makeTartRuntime({
   runInherit = realRunInherit,
   spawnDetached = defaultSpawnDetached,
   sleep = defaultSleep,
+  hasCmd = realHasCmd,
 } = {}) {
   const ensureBooted = (spec) => {
     if (listLocalVms(capture).get(spec.name)?.running) return;
@@ -143,7 +144,8 @@ export function makeTartRuntime({
     // "Image" for tart = the per-sandbox VM, cloned copy-on-write from the
     // provisioned base. tart set only works on a stopped VM — skip if running.
     ensureImage(spec) {
-      if (!hasCmd('tart')) throw new Error("'tart' not found on PATH (brew install cirruslabs/cli/tart)");
+      const hasTartCmd = hasCmd('tart');
+      if (!hasTartCmd) throw new Error("'tart' not found on PATH (brew install cirruslabs/cli/tart)");
       let vms = listLocalVms(capture);
       if (!vms.has(spec.name)) {
         if (!vms.has(MACOS_BASE)) {

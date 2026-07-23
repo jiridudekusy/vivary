@@ -80,6 +80,7 @@ function fakeIo({ listResults, results = {} }) {
       runInherit: (cmd, args) => { calls.push(['RUN', cmd, ...args]); return 0; },
       spawnDetached: (argv, log) => { spawned.push(argv); calls.push(['SPAWN', ...argv]); },
       sleep: () => {},
+      hasCmd: () => true,
     },
   };
 }
