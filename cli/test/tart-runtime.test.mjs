@@ -178,3 +178,21 @@ test('collectMacosProvision flattens plugin steps in plugin order', () => {
     { plugin: 'c', line: 'echo three' },
   ]);
 });
+
+test('buildTartRunArgv appends spec.tartRunArgs after --dir', () => {
+  const argv = buildTartRunArgv({
+    name: 'vivary-demo',
+    mounts: [{ host: '/w', guest: '/w' }],
+    tartRunArgs: ['--no-clipboard'],
+  });
+  assert.deepEqual(argv, [
+    'run', 'vivary-demo', '--no-graphics', '--dir=/w:tag=ws0', '--no-clipboard',
+  ]);
+});
+
+test('buildTartRunArgv without tartRunArgs is unchanged', () => {
+  assert.deepEqual(
+    buildTartRunArgv({ name: 'v', mounts: [] }),
+    ['run', 'v', '--no-graphics'],
+  );
+});

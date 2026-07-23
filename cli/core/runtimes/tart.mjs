@@ -45,6 +45,7 @@ export function buildTartRunArgv(spec) {
   (spec.mounts || []).forEach((m, i) => {
     argv.push(`--dir=${m.host}:${m.ro ? 'ro,' : ''}tag=ws${i}`);
   });
+  argv.push(...(spec.tartRunArgs || []));
   return argv;
 }
 
@@ -101,13 +102,13 @@ export function waitForVm(vm, { capture = realCapture, sleep = defaultSleep, tim
 
 // Detached headless boot + readiness wait. Returns the guest IP.
 export function bootVm(vm, {
-  mounts = [], capture = realCapture, sleep = defaultSleep, spawnDetached = defaultSpawnDetached,
+  mounts = [], runArgs = [], capture = realCapture, sleep = defaultSleep, spawnDetached = defaultSpawnDetached,
 } = {}) {
   const running = [...listLocalVms(capture).values()].filter((v) => v.running).length;
   if (running >= 2) {
     console.error(`WARNING: ${running} macOS VMs already running — Apple caps concurrent guests at 2; this boot may fail.`);
   }
-  spawnDetached(buildTartRunArgv({ name: vm, mounts }), tartLogFile(vm));
+  spawnDetached(buildTartRunArgv({ name: vm, mounts, tartRunArgs: runArgs }), tartLogFile(vm));
   try {
     return waitForVm(vm, { capture, sleep });
   } catch (e) {
@@ -139,7 +140,7 @@ export function makeTartRuntime({
 } = {}) {
   const ensureBooted = (spec) => {
     if (listLocalVms(capture).get(spec.name)?.running) return;
-    bootVm(spec.name, { mounts: spec.mounts || [], capture, sleep, spawnDetached });
+    bootVm(spec.name, { mounts: spec.mounts || [], runArgs: spec.tartRunArgs || [], capture, sleep, spawnDetached });
     mountShares(spec.name, spec.mounts || [], capture);
   };
   return {

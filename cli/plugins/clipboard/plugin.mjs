@@ -90,6 +90,11 @@ export default {
   runArgs({ cfg }) {
     return cfg.clipboard ? ['-e', 'SANDBOX_CLIPBOARD=1'] : [];
   },
+  // tart: native host<->guest clipboard sharing is ON by default (tart-guest-agent).
+  // Honour the opt-in convention — disable it unless --clipboard was given.
+  vmRunArgs({ cfg }) {
+    return cfg.clipboard ? [] : ['--no-clipboard'];
+  },
 
   // GET/POST /clipboard
   broker({ req, res, respond, params, log, sandboxForRequest }) {

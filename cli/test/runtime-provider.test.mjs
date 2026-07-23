@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { renderRunArgs, renderExecArgs } from '../core/runtimes/container-cli.mjs';
 import { resolveRuntime } from '../core/runtimes/index.mjs';
 import { buildRunSpec } from '../core/runtimes/spec.mjs';
+import clipboardPlugin from '../plugins/clipboard/plugin.mjs';
 
 const baseSpec = {
   name: 'claude-sandbox-demo',
@@ -256,4 +257,9 @@ test('buildRunSpec for tart: workspace-only mounts, no plugin/broker args', asyn
   assert.equal(spec.capsAll, false);
   assert.equal(spec.init, false);
   assert.equal(spec.name, 'vivary-demo');
+});
+
+test('clipboard vmRunArgs disables native sharing unless --clipboard', () => {
+  assert.deepEqual(clipboardPlugin.vmRunArgs({ cfg: { clipboard: false } }), ['--no-clipboard']);
+  assert.deepEqual(clipboardPlugin.vmRunArgs({ cfg: { clipboard: true } }), []);
 });

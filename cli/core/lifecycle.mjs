@@ -38,6 +38,14 @@ function makeCtx(cfg, flags, mode, rt) {
   };
 }
 
+// vm-tart plugins contribute extra `tart run` flags (e.g. clipboard's
+// --no-clipboard). No-op for container runtimes.
+async function vmRunArgs(ctx) {
+  if (runtimeKind(ctx.cfg.runtime) !== 'vm-tart') return [];
+  const parts = await Promise.all(getPlugins().map((p) => p.vmRunArgs?.(ctx) || []));
+  return parts.flat();
+}
+
 // Sticky plugin flag names (the only flags that belong in .vivary.json).
 function stickyFlagNames() {
   return Object.entries(pluginFlagDefs())
@@ -115,6 +123,7 @@ export async function cmdStart(argv, forcedAgent) {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [agent.cmd, ...rest], termEnv: termEnvArgs(),
   });
   spec.image = rt.ensureImage(spec);
+  spec.tartRunArgs = await vmRunArgs(ctx);
   process.exit(rt.run(spec));
 }
 
@@ -139,6 +148,7 @@ export async function cmdShell(argv) {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [vm ? 'zsh' : 'bash'], termEnv: termEnvArgs(),
   });
   spec.image = rt.ensureImage(spec);
+  spec.tartRunArgs = await vmRunArgs(ctx);
   process.exit(rt.run(spec));
 }
 
@@ -162,6 +172,7 @@ export async function cmdUp(argv) {
     rm: true, interactive: false, image: IMAGE, command: ['sleep', 'infinity'],
   });
   spec.image = rt.ensureImage(spec);
+  spec.tartRunArgs = await vmRunArgs(ctx);
   // Legacy appended --cap-add ALL before upArgs; here upArgs land in extraArgs and
   // cap-add renders after them. Inert: run flags are position-independent for
   // docker and Apple container, and no upArgs plugin emits caps.
