@@ -8,6 +8,7 @@
 // ashp/pre-entrypoint.sh), agents/<name> (per-sandbox tokens, 0600).
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import https from 'node:https';
 import path from 'node:path';
 import { SANDBOXES_DIR, capture, die, readJson, runInherit } from '../../core/util.mjs';
 import { detectRuntime } from '../../core/runtime.mjs';
@@ -18,6 +19,67 @@ export const ASHP_CONTAINER = 'vivary-ashp';
 export const ASHP_IMAGE = process.env.SANDBOX_ASHP_IMAGE || 'jiridudekusy/ashp:latest';
 const MGMT_PORT = 3000;
 const PLUGIN_DIR = path.dirname(new URL(import.meta.url).pathname);
+
+// ASHP management API runs over HTTPS. The cert/key are generated once on the
+// host (the trust root), mounted into ASHP, and the exact cert is pinned as the
+// sole CA by every mgmt caller — the host (by IP, hostname check skipped) and
+// each sandbox (by the SAN hostname via curl --connect-to). On a shared L2 this
+// stops a peer from sniffing the admin password, the policy sync, or an agent's
+// register-ip token. The cert is bound to a fixed SAN, not the (Apple-dynamic)
+// IP, since pinning makes IP verification unnecessary.
+const MGMT_TLS_HOST_DIR = path.join(ASHP_DIR, 'tls');
+const MGMT_TLS_CONTAINER_DIR = '/etc/ashp-tls';
+const MGMT_HOSTNAME = 'vivary-ashp';
+export const mgmtCertPath = () => path.join(MGMT_TLS_HOST_DIR, 'cert.pem');
+
+// The MITM root CA (public cert only) ASHP generated. The host mounts THIS file
+// into each sandbox — never root.key — so the CA is delivered off the shared L2
+// instead of fetched over it.
+export const ashpCaCertPath = () => path.join(ASHP_DIR, 'data/ca/root.crt');
+export { MGMT_HOSTNAME };
+
+// Generate the self-signed management cert once (host-side). SAN is a fixed
+// hostname, not the IP — pinning the exact cert is the real check.
+function ensureMgmtCert() {
+  const cert = mgmtCertPath();
+  const key = path.join(MGMT_TLS_HOST_DIR, 'key.pem');
+  if (!fs.existsSync(cert) || !fs.existsSync(key)) {
+    fs.mkdirSync(MGMT_TLS_HOST_DIR, { recursive: true });
+    const r = capture('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+      '-keyout', key, '-out', cert, '-days', '3650',
+      '-subj', `/CN=${MGMT_HOSTNAME}`, '-addext', `subjectAltName=DNS:${MGMT_HOSTNAME}`]);
+    if (r.status !== 0) die(`cannot generate ASHP management TLS cert: ${r.stderr || r.stdout}`);
+    fs.chmodSync(key, 0o600);
+  }
+}
+
+let _mgmtCa = null;
+function mgmtCa() {
+  if (!_mgmtCa) _mgmtCa = fs.readFileSync(mgmtCertPath(), 'utf8');
+  return _mgmtCa;
+}
+
+// One HTTPS request to ASHP's management API, pinning ASHP's self-signed cert
+// as the sole CA and skipping hostname/IP verification (the IP is dynamic on
+// Apple; pinning the exact cert is the identity check). Resolves { status, body }.
+function mgmtHttps(ip, { method, route, headers = {}, body, timeoutMs = 5000 }) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      host: ip, port: MGMT_PORT, method, path: `/api${route}`,
+      ca: mgmtCa(), checkServerIdentity: () => undefined,
+      headers, timeout: timeoutMs,
+    }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
 
 // --- secrets & config ---------------------------------------------------------
 
@@ -46,9 +108,14 @@ function stageState() {
   for (const d of ['conf', 'data', 'bin', 'agents']) {
     fs.mkdirSync(path.join(ASHP_DIR, d), { recursive: true });
   }
+  ensureMgmtCert();
   const conf = {
     proxy: { listen: '0.0.0.0:8080', bin_path: '/app/proxy/ashp-proxy', hold_timeout: 60 },
-    management: { listen: `0.0.0.0:${MGMT_PORT}`, auth: { admin: 'env:ASHP_ADMIN_PASSWORD' } },
+    management: {
+      listen: `0.0.0.0:${MGMT_PORT}`,
+      auth: { admin: 'env:ASHP_ADMIN_PASSWORD' },
+      tls: { cert: `${MGMT_TLS_CONTAINER_DIR}/cert.pem`, key: `${MGMT_TLS_CONTAINER_DIR}/key.pem` },
+    },
     rules: { source: 'db' },
     default_behavior: 'deny',
     logging: { request_body: 'full', response_body: 'truncate:65536', retention_days: 30 },
@@ -131,9 +198,8 @@ function ashpEgressIp(runtime) {
 
 async function ashpHealthy(ip, timeoutMs = 1500) {
   try {
-    const res = await fetch(`http://${ip}:${MGMT_PORT}/api/status`,
-      { signal: AbortSignal.timeout(timeoutMs) });
-    return res.ok;
+    const res = await mgmtHttps(ip, { method: 'GET', route: '/status', timeoutMs });
+    return res.status >= 200 && res.status < 300;
   } catch {
     return false;
   }
@@ -158,6 +224,7 @@ function ashpRunArgs(secrets, transparentIp) {
     '-v', `${path.join(ASHP_DIR, 'conf')}:/etc/ashp`,
     '-v', `${path.join(ASHP_DIR, 'data')}:/data`,
     '-v', `${path.join(ASHP_DIR, 'bin')}:/vivary`,
+    '-v', `${MGMT_TLS_HOST_DIR}:${MGMT_TLS_CONTAINER_DIR}`,
     '-e', `ASHP_DB_KEY=${secrets.dbKey}`,
     '-e', `ASHP_LOG_KEY=${secrets.logKey}`,
     '-e', `ASHP_CA_KEY=${secrets.caKey}`,
@@ -229,7 +296,7 @@ export async function ensureAshp(runtime) {
     die(`ASHP failed to become healthy on ${ip}:${MGMT_PORT} (logs: vivary egress logs)`);
   }
   console.log(`==> vivary egress proxy (ASHP) started on ${ip}`);
-  console.log(`    Policy UI: http://${ip}:${MGMT_PORT}/ (user: admin, password: ${path.join(ASHP_DIR, 'secrets.json')})`);
+  console.log(`    Policy UI: https://${ip}:${MGMT_PORT}/ (user: admin, password: ${path.join(ASHP_DIR, 'secrets.json')}; self-signed cert)`);
   return { ip, adminPassword: secrets.adminPassword };
 }
 
@@ -241,24 +308,23 @@ export async function ensureAshp(runtime) {
 async function mgmt(ip, adminPassword, method, route, body, { soft = false } = {}) {
   let res;
   try {
-    res = await fetch(`http://${ip}:${MGMT_PORT}/api${route}`, {
-      method,
+    res = await mgmtHttps(ip, {
+      method, route,
       headers: {
         authorization: 'Basic ' + Buffer.from(`admin:${adminPassword}`).toString('base64'),
         'content-type': 'application/json',
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
     });
   } catch (e) {
     if (soft) return null;
     die(`ASHP API ${method} ${route} failed: ${e.message}`);
   }
-  if (!res.ok) {
+  if (res.status < 200 || res.status >= 300) {
     if (soft) return null;
-    die(`ASHP API ${method} ${route} failed: HTTP ${res.status} ${await res.text()}`);
+    die(`ASHP API ${method} ${route} failed: HTTP ${res.status} ${res.body}`);
   }
-  return res.status === 204 ? null : res.json();
+  return res.status === 204 || !res.body ? null : JSON.parse(res.body);
 }
 
 // Each egress sandbox is one ASHP agent (name = sandbox name, own token).
@@ -282,13 +348,11 @@ export async function ensureAgent(ip, adminPassword, name) {
 }
 
 // Purge hook: drop the persisted token AND, when ASHP is reachable, delete the
-// sandbox's managed allow rules (`vivary:<name>:`) and its ASHP agent record.
-// Best-effort — a down/unhealthy ASHP or a failing call never aborts the purge
-// (the token file, the host-side secret, is always removed). Cleaning the rules
-// matters for correctness AND security: ASHP currently applies allow rules
-// globally (ignores agent_id, see syncAgentRules), so a purged sandbox's rules
-// would otherwise keep whitelisting hosts for every other egress sandbox, and a
-// reused name would inherit never-approved rules.
+// sandbox's managed policy (`vivary:<name>`) with its allow rules, and its ASHP
+// agent record. Best-effort — a down/unhealthy ASHP or a failing call never
+// aborts the purge (the token file, the host-side secret, is always removed).
+// Cleaning up matters so a reused sandbox name never inherits stale,
+// never-approved allow rules.
 export async function purgeAgent(name, runtime) {
   fs.rmSync(path.join(ASHP_DIR, 'agents', name), { force: true });
   runtime = runtime || detectRuntime();
@@ -296,10 +360,14 @@ export async function purgeAgent(name, runtime) {
   const ip = ashpEgressIp(runtime);
   if (!ip || !(await ashpHealthy(ip))) return;
   const { adminPassword } = ensureSecrets();
-  const prefix = `vivary:${name}:`;
-  const rules = await mgmt(ip, adminPassword, 'GET', '/rules', undefined, { soft: true });
-  for (const r of (rules || []).filter((r) => (r.name || '').startsWith(prefix))) {
-    await mgmt(ip, adminPassword, 'DELETE', `/rules/${r.id}`, undefined, { soft: true });
+  const policies = await mgmt(ip, adminPassword, 'GET', '/policies', undefined, { soft: true });
+  const policy = (policies || []).find((p) => p.name === `vivary:${name}`);
+  if (policy) {
+    const rules = await mgmt(ip, adminPassword, 'GET', '/rules', undefined, { soft: true });
+    for (const r of (rules || []).filter((r) => r.policy_id === policy.id)) {
+      await mgmt(ip, adminPassword, 'DELETE', `/rules/${r.id}`, undefined, { soft: true });
+    }
+    await mgmt(ip, adminPassword, 'DELETE', `/policies/${policy.id}`, undefined, { soft: true });
   }
   const agents = await mgmt(ip, adminPassword, 'GET', '/agents', undefined, { soft: true });
   const agent = (agents || []).find((a) => a.name === name);
@@ -308,28 +376,42 @@ export async function purgeAgent(name, runtime) {
 
 // --- config-driven rule sync ------------------------------------------------------
 
+// The dedicated ASHP policy for a sandbox (`vivary:<name>`), created on first
+// use and assigned to the sandbox's agent. Both the create and the assign are
+// idempotent (assignToAgent is INSERT OR IGNORE server-side). Returns the
+// policy record. Per-agent enforcement flows through this: ASHP resolves an
+// agent's rules from the policies assigned to it, so rules under this policy
+// apply to THIS sandbox only.
+async function ensureAgentPolicy(ip, adminPassword, agent) {
+  const name = `vivary:${agent.name}`;
+  const policies = await mgmt(ip, adminPassword, 'GET', '/policies');
+  let policy = (policies || []).find((p) => p.name === name);
+  if (!policy) {
+    policy = await mgmt(ip, adminPassword, 'POST', '/policies',
+      { name, description: 'vivary-managed egress allow-list' });
+  }
+  await mgmt(ip, adminPassword, 'POST', `/policies/${policy.id}/agents`, { agent_id: agent.id });
+  return policy;
+}
+
 // Sync vivary-managed allow rules for one sandbox with the effective egress
-// policy (.vivary.json presets + allow). Managed rules are identified by the
-// name prefix `vivary:<sandbox>:` and carry the sandbox agent's id; rules
-// without the prefix (hand-made in the policy UI) are NEVER touched.
+// policy (.vivary.json presets + allow). vivary owns a dedicated ASHP policy
+// per sandbox and manages only the allow rules INSIDE it (identified by
+// policy_id). Rules and policies created by hand in the UI are NEVER touched.
 // Empty pattern list -> all managed rules for the sandbox are removed
 // (deny-all default, approval via the UI as before).
 //
-// GOTCHA (verified 2026-07-22): ASHP's Go proxy currently ignores a rule's
-// agent_id during matching — plain rules are effectively GLOBAL (a second
-// sandbox passed through another sandbox's allow rule). Per-agent
-// enforcement in ASHP works only via policies, and its flat rules.reload
-// (fired on every rule mutation) overrides the per-agent map anyway. We
-// still set agent_id (bookkeeping + forward compat), but do not promise
-// isolation between egress sandboxes' allow lists until ASHP scopes rules.
+// Enforcement is per-agent: because the rules live in the agent's assigned
+// policy, one sandbox's allow-list is NOT visible to other egress sandboxes.
 export async function syncAgentRules(ip, adminPassword, sandbox, patterns) {
-  const prefix = `vivary:${sandbox}:`;
   const desired = [...new Set(patterns)];
   const agents = await mgmt(ip, adminPassword, 'GET', '/agents');
   const agent = agents.find((a) => a.name === sandbox)
     || die(`egress rule sync: ASHP agent '${sandbox}' not found`);
+  const policy = await ensureAgentPolicy(ip, adminPassword, agent);
+
   const rules = await mgmt(ip, adminPassword, 'GET', '/rules');
-  const mine = rules.filter((r) => (r.name || '').startsWith(prefix));
+  const mine = (rules || []).filter((r) => r.policy_id === policy.id);
 
   const wanted = new Set(desired);
   let removed = 0;
@@ -344,10 +426,10 @@ export async function syncAgentRules(ip, adminPassword, sandbox, patterns) {
   for (const pattern of desired) {
     if (have.has(pattern)) continue;
     await mgmt(ip, adminPassword, 'POST', '/rules', {
-      name: prefix + pattern,
+      name: `vivary:${sandbox}:${pattern}`,
       url_pattern: pattern,
       action: 'allow',
-      agent_id: String(agent.id),
+      policy_id: policy.id,
     });
     created += 1;
   }
@@ -372,7 +454,7 @@ export async function cmdEgress(argv) {
       const ip = ashpEgressIp(runtime);
       const healthy = ip ? await ashpHealthy(ip) : false;
       console.log(`ashp:     running at ${ip} (${healthy ? 'healthy' : 'NOT answering'})`);
-      console.log(`policy:   http://${ip}:${MGMT_PORT}/ (user: admin, password in ${path.join(ASHP_DIR, 'secrets.json')})`);
+      console.log(`policy:   https://${ip}:${MGMT_PORT}/ (user: admin, password in ${path.join(ASHP_DIR, 'secrets.json')}; self-signed cert)`);
       break;
     }
     case 'stop': {

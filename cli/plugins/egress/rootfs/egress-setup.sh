@@ -6,14 +6,16 @@
 # egress. Idempotent.
 #
 # Args (sudo strips the environment, so they are passed positionally):
-#   $1 ASHP_IP     ASHP's address on the vivary-egress net (DNS + CA + register)
+#   $1 ASHP_IP     ASHP's address on the vivary-egress net (DNS + register)
 #   $2 AGENT_NAME  this sandbox's ASHP agent name
 #   $3 AGENT_TOKEN this sandbox's ASHP agent token
+#   $4 MGMT_HOST   hostname in ASHP's mgmt-cert SAN (pinned register over TLS)
 set -uo pipefail
 
 ASHP_IP="${1:?egress-setup: ASHP_IP required}"
 AGENT_NAME="${2:?egress-setup: AGENT_NAME required}"
 AGENT_TOKEN="${3:?egress-setup: AGENT_TOKEN required}"
+MGMT_HOST="${4:-vivary-ashp}"
 
 fail() { echo "ERROR: egress-setup: $*" >&2; exit 1; }
 
@@ -27,13 +29,13 @@ fail() { echo "ERROR: egress-setup: $*" >&2; exit 1; }
     echo "options no-aaaa"
 } > /etc/resolv.conf || fail "could not rewrite /etc/resolv.conf"
 
-# 2) Trust ASHP's MITM CA. curl talks to the mgmt API by IP over plain HTTP,
-#    so no chicken-and-egg with the not-yet-trusted CA.
+# 2) Trust ASHP's MITM CA — delivered by the host at /vivary-egress/ashp-ca.crt
+#    (per-sandbox mount), NOT fetched over the shared egress net where a hostile
+#    peer could serve its own CA during boot and MITM this sandbox afterwards.
+CA_SRC=/vivary-egress/ashp-ca.crt
 CA_DST=/usr/local/share/ca-certificates/ashp.crt
-if ! curl -fsS -m 15 "http://${ASHP_IP}:3000/api/ca/certificate" -o "$CA_DST"; then
-    fail "could not fetch ASHP CA from http://${ASHP_IP}:3000/api/ca/certificate"
-fi
-[ -s "$CA_DST" ] || fail "fetched ASHP CA is empty"
+[ -s "$CA_SRC" ] || fail "ASHP CA not mounted at $CA_SRC"
+cp "$CA_SRC" "$CA_DST" || fail "could not install ASHP CA"
 update-ca-certificates >/dev/null 2>&1 || fail "update-ca-certificates failed"
 
 # Point common runtimes at the merged bundle / the CA (Node ignores the system
@@ -61,20 +63,26 @@ if [ -f "$SSHD_CONF" ] && ! grep -q "NODE_EXTRA_CA_CERTS" "$SSHD_CONF"; then
 fi
 
 # 3) Register this sandbox's vivary-egress IP with ASHP so transparent mode
-#    maps intercepted connections to this agent identity. The egress IP is the
-#    NIC NOT carrying the default route (there is none on an internal net, so
-#    just the sole global v4 here, but derive it robustly).
+#    maps intercepted connections to this agent identity. Done over HTTPS with
+#    the mgmt cert PINNED (--cacert) and the ASHP IP reached via --connect-to
+#    under the cert's SAN hostname, so the agent token is never sniffable on the
+#    shared net and a MITM makes the call fail closed. The egress IP is the sole
+#    global v4 on the internal net (no default route there).
+MGMT_CA=/vivary-egress/mgmt.crt
+[ -s "$MGMT_CA" ] || fail "ASHP mgmt cert not mounted at $MGMT_CA"
 DEF_IFACE="$(ip route | awk '/^default/ {print $5; exit}')"
 MY_IP="$(ip -4 -o addr show scope global | awk -v d="$DEF_IFACE" '$2 != d {print $4; exit}' | cut -d/ -f1)"
 [ -n "$MY_IP" ] || MY_IP="$(ip -4 -o addr show scope global | awk '{print $4; exit}' | cut -d/ -f1)"
 [ -n "$MY_IP" ] || fail "could not determine own egress IP"
-if ! curl -fsS -m 15 -X POST "http://${ASHP_IP}:3000/api/agents/register-ip" \
+if ! curl -fsS -m 15 --cacert "$MGMT_CA" \
+        --connect-to "${MGMT_HOST}:3000:${ASHP_IP}:3000" \
+        -X POST "https://${MGMT_HOST}:3000/api/agents/register-ip" \
         -H 'Content-Type: application/json' \
         -d "{\"name\":\"${AGENT_NAME}\",\"token\":\"${AGENT_TOKEN}\",\"ip_address\":\"${MY_IP}\"}" \
         >/dev/null; then
     fail "could not register IP ${MY_IP} for agent ${AGENT_NAME} with ASHP"
 fi
-echo "egress-setup: registered ${MY_IP} as ASHP agent '${AGENT_NAME}', DNS+CA -> ${ASHP_IP}"
+echo "egress-setup: registered ${MY_IP} as ASHP agent '${AGENT_NAME}', DNS -> ${ASHP_IP}, CA + mgmt-cert from mount"
 
 # 4) Ingress firewall (LAST). Inter-sandbox isolation on the shared net:
 #    host-originated traffic arrives with source = gateway .1 (allow — ssh,

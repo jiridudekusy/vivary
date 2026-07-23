@@ -5,7 +5,14 @@
 // deny requests in ASHP's policy UI. Inter-sandbox isolation comes from an
 // ingress firewall raised inside each sandbox (egress-setup helper): host
 // traffic arrives as gateway .1 and is allowed, peer sandboxes are dropped.
-import { cmdEgress, ensureAgent, ensureAshp, purgeAgent, syncAgentRules, EGRESS_NET } from './ashp.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { die } from '../../core/util.mjs';
+import { sandboxDir } from '../../core/sandbox.mjs';
+import {
+  cmdEgress, ensureAgent, ensureAshp, purgeAgent, syncAgentRules,
+  ashpCaCertPath, mgmtCertPath, EGRESS_NET, MGMT_HOSTNAME,
+} from './ashp.mjs';
 import { expandPresets } from './presets.mjs';
 
 export default {
@@ -38,17 +45,36 @@ export default {
     const policy = cfg.egressPolicy || {};
     const patterns = [...expandPresets(policy.presets), ...(policy.allow || [])];
     await syncAgentRules(ip, adminPassword, cfg.name, patterns);
-    log(`==> egress: outbound via ASHP at ${ip} (policy UI: http://${ip}:3000/)`);
+
+    // Deliver the MITM CA (public) and the mgmt TLS cert (public) to the
+    // sandbox via a per-sandbox mount, instead of the sandbox fetching them
+    // over the shared L2 where a hostile peer could inject its own CA. The CA
+    // private key and the mgmt key never leave the host.
+    const egressDir = path.join(sandboxDir(cfg.name), 'egress');
+    fs.mkdirSync(egressDir, { recursive: true });
+    const caSrc = ashpCaCertPath();
+    for (let i = 0; i < 40 && !fs.existsSync(caSrc); i++) {
+      await new Promise((r) => setTimeout(r, 250)); // ASHP writes its CA on first proxy start
+    }
+    if (!fs.existsSync(caSrc)) {
+      die(`egress: ASHP CA not found at ${caSrc} (ASHP may not have finished starting)`);
+    }
+    fs.copyFileSync(caSrc, path.join(egressDir, 'ashp-ca.crt'));
+    fs.copyFileSync(mgmtCertPath(), path.join(egressDir, 'mgmt.crt'));
+
+    log(`==> egress: outbound via ASHP at ${ip} (policy UI: https://${ip}:3000/)`);
     return [
       '--network', EGRESS_NET,
       '-e', 'SANDBOX_EGRESS=1',
       '-e', `SBX_EGRESS_ASHP_IP=${ip}`,
       '-e', `SBX_EGRESS_AGENT=${cfg.name}`,
       '-e', `SBX_EGRESS_TOKEN=${token}`,
-      // The MITM CA for the main process and `exec` sessions (ssh sessions
-      // get the same from profile.d + sshd SetEnv, written by egress-setup).
-      // Node ignores the system store, so point it at the fetched CA; the
-      // bundle paths for python/requests & co. are valid even before
+      '-e', `SBX_EGRESS_MGMT_HOST=${MGMT_HOSTNAME}`,
+      '-v', `${egressDir}:/vivary-egress`,
+      // The MITM CA for the main process and `exec` sessions (ssh sessions get
+      // the same from profile.d + sshd SetEnv, written by egress-setup). Node
+      // ignores the system store, so point it at the CA egress-setup installs;
+      // the bundle paths for python/requests & co. are valid even before
       // update-ca-certificates merges the CA in.
       '-e', 'NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ashp.crt',
       '-e', 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt',

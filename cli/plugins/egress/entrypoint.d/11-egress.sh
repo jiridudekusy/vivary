@@ -5,4 +5,5 @@
 [ "${SANDBOX_EGRESS:-0}" = "1" ] || exit 0
 sudo /usr/local/bin/egress-setup \
     "${SBX_EGRESS_ASHP_IP:-}" "${SBX_EGRESS_AGENT:-}" "${SBX_EGRESS_TOKEN:-}" \
+    "${SBX_EGRESS_MGMT_HOST:-vivary-ashp}" \
     || echo "WARNING: egress-setup failed — sandbox egress may be broken or unfiltered" >&2
