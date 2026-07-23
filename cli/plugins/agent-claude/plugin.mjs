@@ -117,6 +117,7 @@ export default {
   order: 80,
   agents: { claude: { cmd: 'claude' } },
   launchers: { slaude: 'claude' },
+  macosProvision: ['npm install -g @anthropic-ai/claude-code'],
 
   runArgs({ cfg, dir }) {
     fs.mkdirSync(path.join(dir, 'dot-claude'), { recursive: true });

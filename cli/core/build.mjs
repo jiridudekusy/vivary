@@ -4,9 +4,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CLI_DIR, IMAGE, die, hasCmd, runInherit } from './util.mjs';
+import {
+  CLI_DIR, IMAGE, capture, die, hasCmd, parseArgs, runInherit,
+} from './util.mjs';
 import { detectRuntime } from './runtime.mjs';
 import { getPlugins } from './plugins.mjs';
+import { bootVm, MACOS_BASE, tartLogFile } from './runtimes/tart.mjs';
 
 const IMAGE_DIR = path.join(CLI_DIR, 'image');
 
@@ -43,7 +46,50 @@ export function composeContext() {
   return staging;
 }
 
-export function cmdBuild() {
+const MACOS_BASE_SRC = process.env.SANDBOX_MACOS_BASE_SRC || 'ghcr.io/cirruslabs/macos-tahoe-base:latest';
+
+// Provisioning steps contributed by plugins (agent installs), in plugin order.
+export function collectMacosProvision(plugins) {
+  const steps = [];
+  for (const p of plugins) {
+    for (const line of p.macosProvision || []) steps.push({ plugin: p.name, line });
+  }
+  return steps;
+}
+
+// Clone the cirruslabs base, boot it with an OPEN network, run every
+// plugin's macosProvision step over the guest agent, stop. Sandboxes then
+// clone the result copy-on-write. Building with the network open resolves
+// the chicken-and-egg with egress-locked sandboxes.
+function buildMacosBase({ force = false } = {}) {
+  if (!hasCmd('tart')) die("'tart' not found on PATH (brew install cirruslabs/cli/tart)");
+  const listed = capture('tart', ['list', '--format', 'json']);
+  if (listed.status !== 0) die(`tart list failed: ${listed.stderr || listed.stdout}`);
+  const local = new Map(JSON.parse(listed.stdout || '[]')
+    .filter((vm) => vm.Source === 'local').map((vm) => [vm.Name, vm.Running === true]));
+  if (local.has(MACOS_BASE)) {
+    if (!force) die(`VM '${MACOS_BASE}' already exists — rebuild with: vivary build --runtime tart --force`);
+    if (local.get(MACOS_BASE)) die(`VM '${MACOS_BASE}' is running — stop it first: tart stop ${MACOS_BASE}`);
+    if (capture('tart', ['delete', MACOS_BASE]).status !== 0) die(`cannot delete '${MACOS_BASE}'`);
+  }
+  console.log(`==> Cloning ${MACOS_BASE_SRC} -> ${MACOS_BASE} (pulls the OCI image when not cached)`);
+  if (runInherit('tart', ['clone', MACOS_BASE_SRC, MACOS_BASE]) !== 0) die('tart clone failed');
+  console.log('==> Booting the base VM for provisioning (open network)');
+  bootVm(MACOS_BASE); // throws on failure; vivary.mjs catch prints it
+  for (const { plugin, line } of collectMacosProvision(getPlugins())) {
+    console.log(`==> [${plugin}] ${line}`);
+    if (runInherit('tart', ['exec', MACOS_BASE, '/bin/zsh', '-lc', line]) !== 0) {
+      capture('tart', ['stop', MACOS_BASE]);
+      die(`provisioning step failed (plugin '${plugin}') — the half-provisioned base was stopped; rebuild with --force (log: ${tartLogFile(MACOS_BASE)})`);
+    }
+  }
+  capture('tart', ['stop', MACOS_BASE]);
+  console.log(`==> macOS base '${MACOS_BASE}' ready — tart sandboxes clone it on first start.`);
+}
+
+export function cmdBuild(argv = []) {
+  const { flags } = parseArgs(argv, { runtime: 'string', force: 'boolean' });
+  if (flags.runtime === 'tart') return buildMacosBase({ force: flags.force });
   const runtime = detectRuntime();
   console.log(`==> Using runtime: ${runtime}`);
   const context = composeContext();

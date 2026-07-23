@@ -8,6 +8,7 @@ export default {
   order: 85,
   agents: { codex: { cmd: 'codex' } },
   launchers: { sodex: 'codex' },
+  macosProvision: ['npm install -g @openai/codex'],
 
   runArgs({ dir }) {
     fs.mkdirSync(path.join(dir, 'dot-codex'), { recursive: true });

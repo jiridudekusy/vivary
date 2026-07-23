@@ -10,6 +10,7 @@ export default {
   order: 90,
   agents: { cursor: { cmd: 'cursor-agent' } },
   launchers: { sursor: 'cursor' },
+  macosProvision: ['curl -fsSL https://cursor.com/install | bash'],
 
   runArgs({ dir }) {
     fs.mkdirSync(path.join(dir, 'dot-cursor'), { recursive: true });

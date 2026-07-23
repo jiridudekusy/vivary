@@ -45,6 +45,8 @@ Commands:
                        starts a container; auto-creates like start).
   rm [name] [--purge]  Remove the container (--purge also deletes state).
   build                Build the container image (core + all plugins).
+                       --runtime tart [--force]: build the macOS base VM
+                       (vivary-macos-base) that tart sandboxes clone.
   broker [stop]        Run/stop the host broker (usually automatic).
   help, --help         Show this help.
   --version            Show version.

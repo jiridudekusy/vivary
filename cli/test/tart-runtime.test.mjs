@@ -4,6 +4,7 @@ import {
   buildGuestExecArgv, buildTartRunArgv, envPairsToObject, parseMemoryMb, shq, tartVmName,
 } from '../core/runtimes/tart.mjs';
 import { makeTartRuntime, MACOS_BASE } from '../core/runtimes/tart.mjs';
+import { collectMacosProvision } from '../core/build.mjs';
 
 test('tartVmName prefixes vivary-', () => {
   assert.equal(tartVmName('demo'), 'vivary-demo');
@@ -149,4 +150,17 @@ test('isRunning/runningSet/purge/stop map to tart CLI', () => {
   const flat = io.calls.map((c) => c.join(' '));
   assert.ok(flat.includes('tart stop vivary-demo'));
   assert.ok(flat.includes('tart delete vivary-demo'));
+});
+
+test('collectMacosProvision flattens plugin steps in plugin order', () => {
+  const plugins = [
+    { name: 'a', macosProvision: ['echo one', 'echo two'] },
+    { name: 'b' },
+    { name: 'c', macosProvision: ['echo three'] },
+  ];
+  assert.deepEqual(collectMacosProvision(plugins), [
+    { plugin: 'a', line: 'echo one' },
+    { plugin: 'a', line: 'echo two' },
+    { plugin: 'c', line: 'echo three' },
+  ]);
 });
