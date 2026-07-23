@@ -74,11 +74,39 @@ function ensureSshConfigEntry(name, host, port, dir, { user = 'agent', hostAlias
   fs.writeFileSync(cfgFile, block + content);
 }
 
+// Extract the HostName inside the managed (vivary) Host block for `name`, or
+// null if there is no such block. Pure — used to decide, on purge, whether
+// the block pointed at a tart guest's (DHCP) IP rather than a container's
+// localhost/DNS name, so the matching known_hosts line can be dropped too.
+export function managedHostName(configText, name) {
+  const begin = `# >>> claude-sandbox:${name} (managed by vivary) >>>`;
+  const b = configText.indexOf(begin);
+  if (b === -1) return null;
+  const end = `# <<< claude-sandbox:${name} <<<`;
+  const e = configText.indexOf(end, b);
+  const block = configText.slice(b, e === -1 ? undefined : e);
+  const m = block.match(/^\s*HostName\s+(\S+)/m);
+  return m ? m[1] : null;
+}
+
+const IPV4 = /^(\d{1,3}\.){3}\d{1,3}$/;
+
+// Drop known_hosts lines whose first (comma-separated) host token equals
+// `ip` exactly. Pure — separated from removeSshArtifacts so it's testable
+// without touching the filesystem.
+export function withoutIpKnownHosts(knownHostsText, ip) {
+  return knownHostsText.split('\n')
+    .filter((l) => !(l.split(/\s+/)[0] || '').split(',').includes(ip))
+    .join('\n');
+}
+
 // Remove the managed ~/.ssh/config block and known_hosts entries (on purge).
 function removeSshArtifacts(name) {
   const cfgFile = path.join(HOME, '.ssh/config');
+  let host = null;
   if (fs.existsSync(cfgFile)) {
     let content = fs.readFileSync(cfgFile, 'utf8');
+    host = managedHostName(content, name);
     for (const tool of ['vivary', 'sbx', 'sandbox.sh']) {
       const begin = `# >>> claude-sandbox:${name} (managed by ${tool}) >>>`;
       const end = `# <<< claude-sandbox:${name} <<<`;
@@ -92,9 +120,14 @@ function removeSshArtifacts(name) {
   const kh = path.join(HOME, '.ssh/known_hosts');
   if (fs.existsSync(kh)) {
     const cname = containerName(name);
-    const kept = fs.readFileSync(kh, 'utf8').split('\n')
+    let kept = fs.readFileSync(kh, 'utf8').split('\n')
       .filter((l) => !(l.split(/\s+/)[0] || '').split(',')
         .some((h) => h.replace(/^\[|\]:\d+$/g, '').startsWith(`${cname}.`) || h === cname));
+    // tart guests are keyed by IP (vmPostUp registers them via ssh-keyscan on
+    // the guest's DHCP IP, not by any container-style hostname) — drop that
+    // line too, guarded on the HostName actually being an IPv4 literal so the
+    // container path (HostName localhost/<cname>.<domain>) is unaffected.
+    if (host && IPV4.test(host)) kept = withoutIpKnownHosts(kept.join('\n'), host).split('\n');
     fs.writeFileSync(kh, kept.join('\n'));
   }
 }

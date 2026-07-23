@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sshConfigBlock } from '../plugins/ssh/plugin.mjs';
+import { sshConfigBlock, managedHostName, withoutIpKnownHosts } from '../plugins/ssh/plugin.mjs';
 
 test('sshConfigBlock renders a marker-delimited Host block (container default: hostAlias claude-sandbox-<name>, user agent)', () => {
   const block = sshConfigBlock({
@@ -33,4 +33,30 @@ test('sshConfigBlock renders a custom hostAlias (tart instance name) and user (a
   assert.match(block, /^ {4}IdentitiesOnly yes$/m);
   assert.match(block, /^ {4}UserKnownHostsFile \/h\/\.ssh\/known_hosts$/m);
   assert.match(block, /^# <<< claude-sandbox:demo <<<$/m);
+});
+
+test('managedHostName extracts the HostName from the managed block', () => {
+  const cfg = [
+    '# >>> claude-sandbox:demo (managed by vivary) >>>',
+    'Host vivary-demo',
+    '    HostName 192.168.65.2',
+    '    User admin',
+    '# <<< claude-sandbox:demo <<<',
+    '',
+  ].join('\n');
+  assert.equal(managedHostName(cfg, 'demo'), '192.168.65.2');
+  assert.equal(managedHostName(cfg, 'other'), null);
+  assert.equal(managedHostName('', 'demo'), null);
+});
+
+test('withoutIpKnownHosts drops only the line keyed by the given IP', () => {
+  const kh = [
+    '192.168.65.2 ssh-ed25519 AAAAother',
+    'claude-sandbox-demo.vivary.local ssh-ed25519 AAAAcname',
+    '192.168.65.9 ssh-ed25519 AAAAkeep',
+  ].join('\n');
+  const kept = withoutIpKnownHosts(kh, '192.168.65.2');
+  assert.ok(!kept.includes('192.168.65.2'));
+  assert.ok(kept.includes('claude-sandbox-demo.vivary.local'));
+  assert.ok(kept.includes('192.168.65.9'));
 });
