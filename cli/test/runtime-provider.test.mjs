@@ -259,7 +259,7 @@ test('buildRunSpec for tart: workspace-only mounts, no plugin/broker args', asyn
   assert.equal(spec.name, 'vivary-demo');
 });
 
-test('clipboard vmRunArgs disables native sharing unless --clipboard', () => {
-  assert.deepEqual(clipboardPlugin.vmRunArgs({ cfg: { clipboard: false } }), ['--no-clipboard']);
-  assert.deepEqual(clipboardPlugin.vmRunArgs({ cfg: { clipboard: true } }), []);
+test('clipboard vmContribute disables native sharing unless --clipboard', () => {
+  assert.deepEqual(clipboardPlugin.vmContribute({ cfg: { clipboard: false } }), { runArgs: ['--no-clipboard'] });
+  assert.deepEqual(clipboardPlugin.vmContribute({ cfg: { clipboard: true } }), { runArgs: [] });
 });

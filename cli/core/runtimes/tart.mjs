@@ -131,6 +131,28 @@ function mountShares(vm, mounts, capture) {
   });
 }
 
+// The guest's default IPv4 gateway = the host address it reaches published
+// services on. Resolved in-guest (netstat) once the VM is up.
+export function guestGateway(vm, capture = realCapture) {
+  const r = capture('tart', ['exec', vm, '/bin/zsh', '-lc',
+    "netstat -rn -f inet | awk '/^default/{print $2; exit}'"]);
+  const gw = r.status === 0 ? r.stdout.trim() : '';
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(gw) ? gw : null;
+}
+
+// Substitute the literal __GATEWAY__ placeholder in an env map with the guest's
+// gateway (egress HTTPS_PROXY / host-open SBX_OPEN_URL need it, but it is only
+// known after boot). No placeholder -> no exec cost, so container-shaped envs
+// and plain tart sandboxes pay nothing.
+export function withGateway(env, vm, capture = realCapture) {
+  if (!Object.values(env).some((v) => String(v).includes('__GATEWAY__'))) return env;
+  const gw = guestGateway(vm, capture);
+  if (!gw) throw new Error(`could not resolve the guest gateway for VM '${vm}'`);
+  const out = {};
+  for (const [k, v] of Object.entries(env)) out[k] = String(v).split('__GATEWAY__').join(gw);
+  return out;
+}
+
 export function makeTartRuntime({
   capture = realCapture,
   runInherit = realRunInherit,
@@ -171,14 +193,15 @@ export function makeTartRuntime({
     run(spec, { detached = false } = {}) {
       ensureBooted(spec);
       if (detached) return { status: 0 };
-      const env = { ...envPairsToObject(spec.termEnv), ...spec.env };
+      const env = withGateway({ ...envPairsToObject(spec.termEnv), ...spec.env }, spec.name, capture);
       console.log(`    (macOS VM '${spec.name}' keeps running after the command exits — stop with: vivary down)`);
       return runInherit('tart', buildGuestExecArgv(spec.name, spec.command, {
         interactive: spec.interactive, env, cwd: spec.cwd,
       }));
     },
     exec(vm, argv, opts = {}) {
-      return runInherit('tart', buildGuestExecArgv(vm, argv, opts));
+      const env = withGateway(opts.env || {}, vm, capture);
+      return runInherit('tart', buildGuestExecArgv(vm, argv, { ...opts, env }));
     },
     stop(vm) { return capture('tart', ['stop', vm]); },
     // The VM disk IS the sandbox state (in-guest logins, chats) — plain rm

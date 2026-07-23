@@ -92,8 +92,8 @@ export default {
   },
   // tart: native host<->guest clipboard sharing is ON by default (tart-guest-agent).
   // Honour the opt-in convention — disable it unless --clipboard was given.
-  vmRunArgs({ cfg }) {
-    return cfg.clipboard ? [] : ['--no-clipboard'];
+  vmContribute({ cfg }) {
+    return { runArgs: cfg.clipboard ? [] : ['--no-clipboard'] };
   },
 
   // GET/POST /clipboard

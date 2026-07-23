@@ -38,12 +38,31 @@ function makeCtx(cfg, flags, mode, rt) {
   };
 }
 
-// vm-tart plugins contribute extra `tart run` flags (e.g. clipboard's
-// --no-clipboard). No-op for container runtimes.
-async function vmRunArgs(ctx) {
-  if (runtimeKind(ctx.cfg.runtime) !== 'vm-tart') return [];
-  const parts = await Promise.all(getPlugins().map((p) => p.vmRunArgs?.(ctx) || []));
-  return parts.flat();
+// vm-tart plugins contribute extra `tart run` flags, guest exec env, and
+// virtiofs mounts via `vmContribute(ctx) -> {runArgs?, env?, mounts?}`. No-op
+// for container runtimes. The hook also runs whatever host-side prep the
+// contribution needs (egress: ensure ASHP + per-sandbox agent + policy + CA),
+// and is idempotent so it's safe on both the fresh-start and attach paths.
+// env values may contain the literal __GATEWAY__ — the tart provider resolves
+// it to the guest's default gateway once the VM is up.
+async function vmContribute(ctx) {
+  const merged = { runArgs: [], env: {}, mounts: [] };
+  if (runtimeKind(ctx.cfg.runtime) !== 'vm-tart') return merged;
+  for (const p of getPlugins()) {
+    if (!p.vmContribute) continue;
+    const c = (await p.vmContribute(ctx)) || {};
+    merged.runArgs.push(...(c.runArgs || []));
+    Object.assign(merged.env, c.env || {});
+    merged.mounts.push(...(c.mounts || []));
+  }
+  return merged;
+}
+
+// Fold a vmContribute result into a RunSpec (no-op shape for containers).
+function applyVmContribute(spec, c) {
+  spec.tartRunArgs = c.runArgs;
+  spec.env = { ...spec.env, ...c.env };
+  spec.mounts = [...spec.mounts, ...c.mounts];
 }
 
 // Sticky plugin flag names (the only flags that belong in .vivary.json).
@@ -107,14 +126,15 @@ export async function cmdStart(argv, forcedAgent) {
     || die(`unknown agent '${agentName}' (available: ${Object.keys(agents).join(', ')})`);
   const rt = resolveRuntime(cfg.runtime);
   const ctx = makeCtx(cfg, flags, 'start', rt);
+  const vm = runtimeKind(cfg.runtime) === 'vm-tart';
+  // vm-tart host integration (clipboard/egress/host-open) rides vmContribute;
+  // containers use -e broker env. Gather once for both the attach & fresh paths.
+  const contrib = await vmContribute(ctx);
   if (rt.isRunning(cfg.name)) {
     console.log(`==> Container already running, attaching (${agent.cmd})...`);
-    const vm = runtimeKind(cfg.runtime) === 'vm-tart';
-    // vm-tart: no broker env in Phase 2 (host integration lands later),
-    // mirroring the buildRunSpec gate on the fresh-start path.
     process.exit(rt.exec(ctx.cname, [agent.cmd, ...rest], {
       interactive: IS_TTY,
-      env: { ...termEnvVars(), ...(vm ? {} : await brokerEnvVars(cfg)) },
+      env: { ...termEnvVars(), ...(vm ? contrib.env : await brokerEnvVars(cfg)) },
       cwd: cfg.workspace,
     }));
   }
@@ -123,7 +143,7 @@ export async function cmdStart(argv, forcedAgent) {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [agent.cmd, ...rest], termEnv: termEnvArgs(),
   });
   spec.image = rt.ensureImage(spec);
-  spec.tartRunArgs = await vmRunArgs(ctx);
+  applyVmContribute(spec, contrib);
   process.exit(rt.run(spec));
 }
 
@@ -133,12 +153,11 @@ export async function cmdShell(argv) {
   const ctx = makeCtx(cfg, flags, 'shell', rt);
   const vm = runtimeKind(cfg.runtime) === 'vm-tart';
   // vm-tart: guest shell is zsh (macOS native); containers use bash.
+  const contrib = await vmContribute(ctx);
   if (rt.isRunning(cfg.name)) {
-    // vm-tart: no broker env in Phase 2 (host integration lands later),
-    // mirroring the buildRunSpec gate on the fresh-start path.
     process.exit(rt.exec(ctx.cname, [vm ? 'zsh' : 'bash'], {
       interactive: IS_TTY,
-      env: { ...termEnvVars(), ...(vm ? {} : await brokerEnvVars(cfg)) },
+      env: { ...termEnvVars(), ...(vm ? contrib.env : await brokerEnvVars(cfg)) },
       cwd: cfg.workspace,
     }));
   }
@@ -148,7 +167,7 @@ export async function cmdShell(argv) {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [vm ? 'zsh' : 'bash'], termEnv: termEnvArgs(),
   });
   spec.image = rt.ensureImage(spec);
-  spec.tartRunArgs = await vmRunArgs(ctx);
+  applyVmContribute(spec, contrib);
   process.exit(rt.run(spec));
 }
 
@@ -172,7 +191,7 @@ export async function cmdUp(argv) {
     rm: true, interactive: false, image: IMAGE, command: ['sleep', 'infinity'],
   });
   spec.image = rt.ensureImage(spec);
-  spec.tartRunArgs = await vmRunArgs(ctx);
+  applyVmContribute(spec, await vmContribute(ctx));
   // Legacy appended --cap-add ALL before upArgs; here upArgs land in extraArgs and
   // cap-add renders after them. Inert: run flags are position-independent for
   // docker and Apple container, and no upArgs plugin emits caps.

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildGuestExecArgv, buildTartRunArgv, envPairsToObject, parseMemoryMb, shq, tartVmName,
+  buildGuestExecArgv, buildTartRunArgv, envPairsToObject, parseMemoryMb, shq, tartVmName, withGateway,
 } from '../core/runtimes/tart.mjs';
 import { makeTartRuntime, MACOS_BASE } from '../core/runtimes/tart.mjs';
 import { collectMacosProvision } from '../core/build.mjs';
@@ -195,4 +195,21 @@ test('buildTartRunArgv without tartRunArgs is unchanged', () => {
     buildTartRunArgv({ name: 'v', mounts: [] }),
     ['run', 'v', '--no-graphics'],
   );
+});
+
+test('withGateway substitutes __GATEWAY__ from the guest default route', () => {
+  const capture = (cmd, args) => {
+    assert.equal(cmd, 'tart'); assert.equal(args[0], 'exec');
+    return { status: 0, stdout: '192.168.65.1\n', stderr: '' };
+  };
+  const out = withGateway({ HTTPS_PROXY: 'http://a:b@__GATEWAY__:3128', PLAIN: 'x' }, 'vm', capture);
+  assert.deepEqual(out, { HTTPS_PROXY: 'http://a:b@192.168.65.1:3128', PLAIN: 'x' });
+});
+
+test('withGateway is a no-op (no exec) when there is no placeholder', () => {
+  let called = false;
+  const capture = () => { called = true; return { status: 0, stdout: '', stderr: '' }; };
+  const env = { A: '1' };
+  assert.equal(withGateway(env, 'vm', capture), env);
+  assert.equal(called, false);
 });
