@@ -12,10 +12,19 @@ import { allowedWorkspaces } from '../../core/sandbox.mjs';
 import { brokerLog } from '../../core/broker.mjs';
 
 // --- OAuth callback relay -----------------------------------------------------
-const activeRelays = new Set();
+const activeRelays = new Map(); // port -> owning sandbox name
 
 function startCallbackRelay(cfg, port) {
-  if (activeRelays.has(port)) return;
+  const owner = activeRelays.get(port);
+  if (owner !== undefined) {
+    // A different sandbox already holds this callback port — do not let this
+    // one hijack another sandbox's OAuth callback.
+    if (owner !== cfg.name) brokerLog(`RELAY :${port} refused for ${cfg.name} (owned by ${owner})`);
+    return;
+  }
+  // Claim the port synchronously, before the async listen() callback, so a
+  // second sandbox can't race in during startup.
+  activeRelays.set(port, cfg.name);
   const cname = containerName(cfg.name);
   const relay = http.createServer((req, res) => {
     const r = spawnSync(cfg.runtime, [
@@ -47,7 +56,6 @@ function startCallbackRelay(cfg, port) {
     brokerLog(`RELAY :${port} listen failed: ${e.code}`);
   });
   relay.listen(port, '127.0.0.1', () => {
-    activeRelays.add(port);
     brokerLog(`RELAY ${cfg.name} listening on 127.0.0.1:${port} (5 min)`);
     setTimeout(() => { relay.close(); activeRelays.delete(port); }, 300000);
   });
@@ -207,11 +215,11 @@ export default {
   needsBroker: (cfg) => !!cfg.hostOpen,
 
   // POST / with action=url|path
-  broker({ req, respond, params, log, sandboxForRequest }) {
+  broker({ req, respond, params, log, sandbox }) {
     if (req.method !== 'POST' || !params.get('action')) return false;
-    const cfg = sandboxForRequest(params.get('name') || '');
+    const cfg = sandbox; // resolved from the caller's token, not a client-supplied name
     if (!cfg?.hostOpen) {
-      log(`REJECTED open (not enabled) from ${params.get('name') || '?'}`);
+      log(`REJECTED open (not enabled) from ${cfg?.name || '?'}`);
       respond(403, { ok: false, error: 'host-open not enabled for this sandbox (--host-open)' });
       return true;
     }

@@ -97,11 +97,11 @@ export default {
   },
 
   // GET/POST /clipboard
-  broker({ req, res, respond, params, log, sandboxForRequest }) {
+  broker({ req, res, respond, params, log, sandbox }) {
     if (!req.url.startsWith('/clipboard')) return false;
-    const cfg = sandboxForRequest(params.get('name') || '');
+    const cfg = sandbox; // resolved from the caller's token, not a client-supplied name
     if (!cfg?.clipboard) {
-      log(`REJECTED clipboard (not enabled) from ${params.get('name') || '?'}`);
+      log(`REJECTED clipboard (not enabled) from ${cfg?.name || '?'}`);
       respond(403, { ok: false, error: 'clipboard not enabled for this sandbox (--clipboard)' });
       return true;
     }

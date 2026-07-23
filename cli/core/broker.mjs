@@ -8,19 +8,45 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { CLI_DIR, SANDBOXES_DIR, die } from './util.mjs';
-import { loadSandbox } from './sandbox.mjs';
+import { loadSandbox, listSandboxNames, sandboxDir } from './sandbox.mjs';
 import { getPlugins } from './plugins.mjs';
 
 export const BROKER_DIR = path.join(SANDBOXES_DIR, '.broker');
 export const BROKER_PORT = Number(process.env.SBX_BROKER_PORT || 7377);
 
-export function brokerToken() {
-  const file = path.join(BROKER_DIR, 'token');
+// Per-sandbox broker token. Each sandbox gets its own random token, persisted
+// in its state dir (0600) and injected only into that container. The broker
+// authorizes a request by matching this token back to its sandbox, so the
+// capabilities a request runs with are bound to the token holder — never to a
+// client-supplied name, which any sandbox could forge to borrow another
+// sandbox's host-open / clipboard access.
+export function sandboxBrokerToken(name) {
+  const file = path.join(sandboxDir(name), 'broker-token');
   if (!fs.existsSync(file)) {
-    fs.mkdirSync(BROKER_DIR, { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, crypto.randomBytes(24).toString('hex'), { mode: 0o600 });
   }
   return fs.readFileSync(file, 'utf8').trim();
+}
+
+// Resolve the sandbox whose broker token equals the presented one, comparing in
+// constant time. Returns null if none matches.
+function sandboxByToken(presented) {
+  if (!presented) return null;
+  const want = Buffer.from(String(presented));
+  for (const name of listSandboxNames()) {
+    let tok;
+    try {
+      tok = fs.readFileSync(path.join(sandboxDir(name), 'broker-token'), 'utf8').trim();
+    } catch {
+      continue;
+    }
+    const have = Buffer.from(tok);
+    if (have.length === want.length && crypto.timingSafeEqual(have, want)) {
+      return loadSandbox(name);
+    }
+  }
+  return null;
 }
 
 export function brokerLog(line) {
@@ -52,7 +78,7 @@ export async function ensureBroker() {
     if (!(await brokerHealthy())) die(`broker failed to start (see ${BROKER_DIR}/broker.log)`);
     console.log(`==> vivary broker started on port ${BROKER_PORT}`);
   }
-  return { url: `http://host.docker.internal:${BROKER_PORT}/`, token: brokerToken() };
+  return { url: `http://host.docker.internal:${BROKER_PORT}/` };
 }
 
 // Broker announcement for the sandbox (when any enabled plugin needs it) —
@@ -60,18 +86,12 @@ export async function ensureBroker() {
 export async function brokerEnvVars(cfg) {
   const needed = getPlugins().some((p) => p.needsBroker?.(cfg));
   if (!needed) return {};
-  const { url, token } = await ensureBroker();
-  return { SBX_OPEN_URL: url, SBX_OPEN_TOKEN: token };
+  const { url } = await ensureBroker();
+  return { SBX_OPEN_URL: url, SBX_OPEN_TOKEN: sandboxBrokerToken(cfg.name) };
 }
 
 export async function brokerEnvArgs(cfg) {
   return Object.entries(await brokerEnvVars(cfg)).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-}
-
-// The sandbox name is client-supplied; it gates which broker features the
-// caller may use (single-user trust model — token is the real auth).
-export function sandboxForRequest(name) {
-  return name && /^[a-z0-9-]+$/.test(name) ? loadSandbox(name) : null;
 }
 
 export function cmdBroker(argv) {
@@ -85,7 +105,6 @@ export function cmdBroker(argv) {
     }
     return;
   }
-  const token = brokerToken();
   fs.mkdirSync(BROKER_DIR, { recursive: true });
   fs.writeFileSync(pidFile, String(process.pid));
 
@@ -97,11 +116,12 @@ export function cmdBroker(argv) {
     if (req.method === 'GET' && req.url === '/health') return respond(200, { ok: true });
 
     const dispatch = (params) => {
-      if (params.get('token') !== token) {
+      const sandbox = sandboxByToken(params.get('token'));
+      if (!sandbox) {
         brokerLog(`DENIED bad token from ${req.socket.remoteAddress}`);
         return respond(403, { ok: false, error: 'bad token' });
       }
-      const ctx = { req, res, respond, params, log: brokerLog, sandboxForRequest };
+      const ctx = { req, res, respond, params, log: brokerLog, sandbox };
       for (const p of getPlugins()) {
         if (p.broker && p.broker(ctx)) return;
       }
