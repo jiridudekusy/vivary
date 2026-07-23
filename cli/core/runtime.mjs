@@ -45,9 +45,13 @@ export function containerDnsDomain() {
 
 // Pass the host terminal's capabilities, otherwise the TUI degrades to 16
 // colors (illegible menus on themed terminals).
+export function termEnvVars() {
+  return {
+    TERM: process.env.TERM || 'xterm-256color',
+    COLORTERM: process.env.COLORTERM || 'truecolor',
+  };
+}
+
 export function termEnvArgs() {
-  return [
-    '-e', `TERM=${process.env.TERM || 'xterm-256color'}`,
-    '-e', `COLORTERM=${process.env.COLORTERM || 'truecolor'}`,
-  ];
+  return Object.entries(termEnvVars()).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 }

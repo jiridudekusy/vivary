@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderRunArgs } from '../core/runtimes/container-cli.mjs';
+import { renderRunArgs, renderExecArgs } from '../core/runtimes/container-cli.mjs';
 import { resolveRuntime } from '../core/runtimes/index.mjs';
 import { buildRunSpec } from '../core/runtimes/spec.mjs';
 
@@ -216,4 +216,24 @@ test('start-shaped spec renders a run argv ending in image + command', async () 
 
 test('resolveRuntime(tart) fails with a phase-2 hint, not unknown-runtime', () => {
   assert.throws(() => resolveRuntime('tart'), /Phase 2|not yet/i);
+});
+
+test('renderExecArgs reproduces the legacy attach argv (env object -> -e pairs)', () => {
+  const argv = renderExecArgs('claude-sandbox-demo', ['claude', '--resume'], {
+    interactive: true,
+    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', SBX_OPEN_URL: 'http://x/' },
+  });
+  assert.deepEqual(argv, [
+    'exec', '-it',
+    '-e', 'TERM=xterm-256color', '-e', 'COLORTERM=truecolor', '-e', 'SBX_OPEN_URL=http://x/',
+    'claude-sandbox-demo', 'claude', '--resume',
+  ]);
+});
+
+test('renderExecArgs non-interactive omits -it; empty env adds nothing', () => {
+  assert.deepEqual(renderExecArgs('c', ['bash'], {}), ['exec', 'c', 'bash']);
+});
+
+test('container-cli instanceName is the legacy containerName', () => {
+  assert.equal(resolveRuntime('docker').instanceName('demo'), 'claude-sandbox-demo');
 });

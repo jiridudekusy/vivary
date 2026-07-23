@@ -28,12 +28,21 @@ export function renderRunArgs(spec, { runtime }) {
   return argv;
 }
 
+// Renders the `exec` argv for docker/Apple `container`. env is an object;
+// cwd is accepted for interface parity but ignored — these CLIs inherit the
+// working dir set by `run -w`.
+export function renderExecArgs(cname, argv, { interactive = false, env = {} } = {}) {
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+  return ['exec', ...(interactive ? ['-it'] : []), ...envArgs, cname, ...argv];
+}
+
 export function makeContainerCliRuntime(name) {
   return {
     name,
     kind: 'container-cli',
     runArgv(spec) { return renderRunArgs(spec, { runtime: name }); },
     ensureImage(spec) { return spec.image; },
+    instanceName(sandboxName) { return containerName(sandboxName); },
     run(spec, { detached = false } = {}) {
       const argv = renderRunArgs(spec, { runtime: name });
       if (detached) {
@@ -43,9 +52,8 @@ export function makeContainerCliRuntime(name) {
       }
       return runInherit(name, argv);
     },
-    exec(cname, argv, { interactive = false, env = [] } = {}) {
-      const a = ['exec', ...(interactive ? ['-it'] : []), ...env, cname, ...argv];
-      return runInherit(name, a);
+    exec(cname, argv, opts = {}) {
+      return runInherit(name, renderExecArgs(cname, argv, opts));
     },
     stop(cname) { return capture(name, ['stop', cname]); },
     rm(cname) { return capture(name, ['rm', cname]); },

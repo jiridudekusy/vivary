@@ -55,12 +55,17 @@ export async function ensureBroker() {
   return { url: `http://host.docker.internal:${BROKER_PORT}/`, token: brokerToken() };
 }
 
-// Container env announcing the broker (when any enabled plugin needs it).
-export async function brokerEnvArgs(cfg) {
+// Broker announcement for the sandbox (when any enabled plugin needs it) —
+// as an env object; brokerEnvArgs renders the docker-args form.
+export async function brokerEnvVars(cfg) {
   const needed = getPlugins().some((p) => p.needsBroker?.(cfg));
-  if (!needed) return [];
+  if (!needed) return {};
   const { url, token } = await ensureBroker();
-  return ['-e', `SBX_OPEN_URL=${url}`, '-e', `SBX_OPEN_TOKEN=${token}`];
+  return { SBX_OPEN_URL: url, SBX_OPEN_TOKEN: token };
+}
+
+export async function brokerEnvArgs(cfg) {
+  return Object.entries(await brokerEnvVars(cfg)).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 }
 
 // The sandbox name is client-supplied; it gates which broker features the

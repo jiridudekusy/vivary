@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, die, parseArgs, sanitizeName } from './util.mjs';
-import { containerName, termEnvArgs } from './runtime.mjs';
+import { termEnvArgs, termEnvVars } from './runtime.mjs';
 import { resolveRuntime } from './runtimes/index.mjs';
 import { buildRunSpec } from './runtimes/spec.mjs';
 import {
@@ -14,7 +14,7 @@ import {
   PROJECT_CONFIG_NAME, approveProjectConfig, loadGlobalConfig, loadProjectConfig,
   markApproved, resolveEffectiveConfig, writeBackCliFlags,
 } from './config.mjs';
-import { brokerEnvArgs } from './broker.mjs';
+import { brokerEnvArgs, brokerEnvVars } from './broker.mjs';
 
 const CORE_FLAGS = {
   name: 'string', workspace: 'string', agent: 'string', runtime: 'string',
@@ -25,14 +25,14 @@ function flagSpec() {
   return { ...CORE_FLAGS, ...pluginFlagSpec() };
 }
 
-function makeCtx(cfg, flags, mode) {
+function makeCtx(cfg, flags, mode, rt) {
   return {
     cfg,
     flags,
     mode, // 'start' | 'up' | 'shell'
     dir: sandboxDir(cfg.name),
     runtime: cfg.runtime,
-    cname: containerName(cfg.name),
+    cname: rt.instanceName(cfg.name),
     HOME,
     log: (msg) => console.log(msg),
   };
@@ -97,46 +97,48 @@ export async function cmdStart(argv, forcedAgent) {
   const agentName = forcedAgent || flags.agent || cfg.agent || 'claude';
   const agent = agents[agentName]
     || die(`unknown agent '${agentName}' (available: ${Object.keys(agents).join(', ')})`);
-  const ctx = makeCtx(cfg, flags, 'start');
   const rt = resolveRuntime(cfg.runtime);
+  const ctx = makeCtx(cfg, flags, 'start', rt);
   if (rt.isRunning(cfg.name)) {
     console.log(`==> Container already running, attaching (${agent.cmd})...`);
     process.exit(rt.exec(ctx.cname, [agent.cmd, ...rest], {
       interactive: IS_TTY,
-      env: [...termEnvArgs(), ...(await brokerEnvArgs(cfg))],
+      env: { ...termEnvVars(), ...(await brokerEnvVars(cfg)) },
+      cwd: cfg.workspace,
     }));
   }
   console.log(`==> Runtime: ${cfg.runtime} | agent: ${agentName} | workspace: ${cfg.workspace}`);
-  const image = rt.ensureImage({ image: IMAGE });
   const spec = await buildRunSpec(ctx, {
-    rm: true, interactive: IS_TTY, image, command: [agent.cmd, ...rest], termEnv: termEnvArgs(),
+    rm: true, interactive: IS_TTY, image: IMAGE, command: [agent.cmd, ...rest], termEnv: termEnvArgs(),
   });
+  spec.image = rt.ensureImage(spec);
   process.exit(rt.run(spec));
 }
 
 export async function cmdShell(argv) {
   const { cfg, flags } = await prepare(argv);
-  const ctx = makeCtx(cfg, flags, 'shell');
   const rt = resolveRuntime(cfg.runtime);
+  const ctx = makeCtx(cfg, flags, 'shell', rt);
   if (rt.isRunning(cfg.name)) {
     process.exit(rt.exec(ctx.cname, ['bash'], {
       interactive: IS_TTY,
-      env: [...termEnvArgs(), ...(await brokerEnvArgs(cfg))],
+      env: { ...termEnvVars(), ...(await brokerEnvVars(cfg)) },
+      cwd: cfg.workspace,
     }));
   }
 
   console.log(`==> Runtime: ${cfg.runtime} | shell | workspace: ${cfg.workspace}`);
-  const image = rt.ensureImage({ image: IMAGE });
   const spec = await buildRunSpec(ctx, {
-    rm: true, interactive: IS_TTY, image, command: ['bash'], termEnv: termEnvArgs(),
+    rm: true, interactive: IS_TTY, image: IMAGE, command: ['bash'], termEnv: termEnvArgs(),
   });
+  spec.image = rt.ensureImage(spec);
   process.exit(rt.run(spec));
 }
 
 export async function cmdUp(argv) {
   const { cfg, flags } = await prepare(argv);
-  const ctx = makeCtx(cfg, flags, 'up');
   const rt = resolveRuntime(cfg.runtime);
+  const ctx = makeCtx(cfg, flags, 'up', rt);
   if (rt.isRunning(cfg.name)) {
     die(`'${ctx.cname}' is already running (stop it with: vivary down ${cfg.name})`);
   }
@@ -145,10 +147,10 @@ export async function cmdUp(argv) {
     if (p.preUp) await p.preUp(ctx);
   }
 
-  const image = rt.ensureImage({ image: IMAGE });
   const spec = await buildRunSpec(ctx, {
-    rm: true, interactive: false, image, command: ['sleep', 'infinity'],
+    rm: true, interactive: false, image: IMAGE, command: ['sleep', 'infinity'],
   });
+  spec.image = rt.ensureImage(spec);
   // Legacy appended --cap-add ALL before upArgs; here upArgs land in extraArgs and
   // cap-add renders after them. Inert: run flags are position-independent for
   // docker and Apple container, and no upArgs plugin emits caps.
@@ -175,7 +177,7 @@ export function cmdDown(argv) {
     console.log(`Sandbox '${name}' is not running.`);
     return;
   }
-  rt.stop(containerName(name));
+  rt.stop(rt.instanceName(name));
   console.log(`==> Sandbox '${name}' stopped (state and chats are preserved).`);
 }
 
@@ -193,7 +195,8 @@ export function cmdList() {
   for (const name of names.sort()) {
     const cfg = loadSandbox(name);
     if (!cfg) continue;
-    const status = running[cfg.runtime]?.has(containerName(name)) ? 'running' : 'stopped';
+    const rt = running[cfg.runtime] ? resolveRuntime(cfg.runtime) : null;
+    const status = rt && running[cfg.runtime].has(rt.instanceName(name)) ? 'running' : 'stopped';
     rows.push([name, cfg.agent || 'claude', cfg.runtime || '?', status, cfg.workspace || '?']);
   }
   const widths = rows[0].map((_, c) => Math.max(...rows.map((r) => String(r[c]).length)));
@@ -206,8 +209,8 @@ export async function cmdRm(argv) {
   const { flags, positionals } = parseArgs(argv, { name: 'string', purge: 'boolean' });
   const name = flags.name || positionals[0] || sanitizeName(path.basename(process.cwd()));
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
-  const cname = containerName(name);
   const rt = resolveRuntime(cfg.runtime);
+  const cname = rt.instanceName(name);
   if (rt.isRunning(name)) rt.stop(cname);
   rt.rm(cname);
   console.log(`==> Container removed. Chat history remains in ${path.join(HOME, '.claude/projects')}.`);
