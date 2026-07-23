@@ -18,6 +18,10 @@ export const EGRESS_NET = 'vivary-egress';
 export const ASHP_CONTAINER = 'vivary-ashp';
 export const ASHP_IMAGE = process.env.SANDBOX_ASHP_IMAGE || 'jiridudekusy/ashp:latest';
 const MGMT_PORT = 3000;
+// ASHP's explicit forward-proxy listener. Published to the host so tart macOS
+// guests (which can't join the internal egress net) reach it at the vmnet
+// gateway; Linux containers keep using the transparent :443/:80 intercept.
+export const PROXY_PORT = Number(process.env.SBX_ASHP_PROXY_PORT || 3128);
 const PLUGIN_DIR = path.dirname(new URL(import.meta.url).pathname);
 
 // ASHP management API runs over HTTPS. The cert/key are generated once on the
@@ -110,7 +114,7 @@ function stageState() {
   }
   ensureMgmtCert();
   const conf = {
-    proxy: { listen: '0.0.0.0:8080', bin_path: '/app/proxy/ashp-proxy', hold_timeout: 60 },
+    proxy: { listen: `0.0.0.0:${PROXY_PORT}`, bin_path: '/app/proxy/ashp-proxy', hold_timeout: 60 },
     management: {
       listen: `0.0.0.0:${MGMT_PORT}`,
       auth: { admin: 'env:ASHP_ADMIN_PASSWORD' },
@@ -221,6 +225,9 @@ function ashpRunArgs(secrets, transparentIp) {
   const args = [
     '--name', ASHP_CONTAINER,
     '--entrypoint', '/vivary/pre-entrypoint.sh',
+    // Publish the explicit proxy to the host (0.0.0.0) — tart guests reach it
+    // at the vmnet gateway; harmless for the transparent (container) path.
+    '-p', `${PROXY_PORT}:${PROXY_PORT}`,
     '-v', `${path.join(ASHP_DIR, 'conf')}:/etc/ashp`,
     '-v', `${path.join(ASHP_DIR, 'data')}:/data`,
     '-v', `${path.join(ASHP_DIR, 'bin')}:/vivary`,

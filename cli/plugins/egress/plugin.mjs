@@ -8,12 +8,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { die } from '../../core/util.mjs';
+import { detectRuntime } from '../../core/runtime.mjs';
+import { runtimeKind } from '../../core/runtimes/index.mjs';
 import { sandboxDir } from '../../core/sandbox.mjs';
 import {
   cmdEgress, ensureAgent, ensureAshp, purgeAgent, syncAgentRules,
-  ashpCaCertPath, mgmtCertPath, EGRESS_NET, MGMT_HOSTNAME,
+  ashpCaCertPath, mgmtCertPath, EGRESS_NET, MGMT_HOSTNAME, PROXY_PORT,
 } from './ashp.mjs';
 import { expandPresets } from './presets.mjs';
+
+// Where the per-sandbox egress dir (ASHP CA) mounts inside a tart guest.
+const TART_EGRESS_DIR = '/Users/admin/.vivary-egress';
 
 export default {
   name: 'egress',
@@ -80,6 +85,48 @@ export default {
       '-e', 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt',
       '-e', 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt',
     ];
+  },
+
+  // tart: no internal egress net and no in-guest firewall. Instead: a Softnet
+  // floor (default-deny outbound, gateway-only) forces the guest's ONLY route
+  // out to be the host, where ASHP's explicit proxy (published on the vmnet
+  // gateway) enforces the L7 policy. The MITM CA rides in on a per-sandbox RO
+  // mount (never fetched over the wire), and HTTPS_PROXY carries the agent's
+  // ASHP token so per-agent rules apply. __GATEWAY__ is resolved after boot.
+  async vmContribute(ctx) {
+    const { cfg, log } = ctx;
+    if (!cfg.egress || runtimeKind(cfg.runtime) !== 'vm-tart') return {};
+    const runtime = detectRuntime(); // ASHP itself always runs as a container
+    const { ip, adminPassword } = await ensureAshp(runtime);
+    const token = await ensureAgent(ip, adminPassword, cfg.name);
+    const policy = cfg.egressPolicy || {};
+    const patterns = [...expandPresets(policy.presets), ...(policy.allow || [])];
+    await syncAgentRules(ip, adminPassword, cfg.name, patterns);
+
+    const egressDir = path.join(sandboxDir(cfg.name), 'egress');
+    fs.mkdirSync(egressDir, { recursive: true });
+    const caSrc = ashpCaCertPath();
+    for (let i = 0; i < 40 && !fs.existsSync(caSrc); i++) {
+      await new Promise((r) => setTimeout(r, 250)); // ASHP writes its CA on first proxy start
+    }
+    if (!fs.existsSync(caSrc)) {
+      die(`egress: ASHP CA not found at ${caSrc} (ASHP may not have finished starting)`);
+    }
+    fs.copyFileSync(caSrc, path.join(egressDir, 'ashp-ca.crt'));
+    const guestCa = `${TART_EGRESS_DIR}/ashp-ca.crt`;
+    const proxy = `http://${cfg.name}:${token}@__GATEWAY__:${PROXY_PORT}`;
+
+    log(`==> egress(tart): softnet default-deny + ASHP proxy at <gateway>:${PROXY_PORT} (policy UI: https://${ip}:3000/)`);
+    return {
+      // Softnet floor: deny all, allow only the vmnet/private space (the guest
+      // can physically reach only the host gateway there — i.e. the proxy).
+      runArgs: ['--net-softnet', '--net-softnet-block=0.0.0.0/0', '--net-softnet-allow=192.168.0.0/16'],
+      mounts: [{ host: egressDir, guest: TART_EGRESS_DIR, ro: true }],
+      env: {
+        HTTPS_PROXY: proxy, HTTP_PROXY: proxy, https_proxy: proxy, http_proxy: proxy,
+        NODE_EXTRA_CA_CERTS: guestCa, SSL_CERT_FILE: guestCa, REQUESTS_CA_BUNDLE: guestCa,
+      },
+    };
   },
 
   async onPurge(name) {
