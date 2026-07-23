@@ -240,3 +240,20 @@ test('renderExecArgs non-interactive omits -it; empty env adds nothing', () => {
 test('container-cli instanceName is the legacy containerName', () => {
   assert.equal(resolveRuntime('docker').instanceName('demo'), 'claude-sandbox-demo');
 });
+
+test('buildRunSpec for tart: workspace-only mounts, no plugin/broker args', async () => {
+  const trap = [{ runArgs: () => { throw new Error('plugins must not run for tart'); }, needsCaps: () => true }];
+  const ctx = {
+    cfg: { name: 'demo', workspace: '/w/demo', runtime: 'tart' },
+    flags: {}, dir: '/state/demo', cname: 'vivary-demo',
+  };
+  const spec = await buildRunSpec(ctx, {
+    rm: true, interactive: true, image: 'ignored', command: ['claude'],
+    plugins: trap, brokerEnv: async () => { throw new Error('broker must not run for tart'); },
+  });
+  assert.deepEqual(spec.mounts, [{ host: '/w/demo', guest: '/w/demo' }]);
+  assert.deepEqual(spec.extraArgs, []);
+  assert.equal(spec.capsAll, false);
+  assert.equal(spec.init, false);
+  assert.equal(spec.name, 'vivary-demo');
+});

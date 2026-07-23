@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, die, parseArgs, sanitizeName } from './util.mjs';
 import { termEnvArgs, termEnvVars } from './runtime.mjs';
-import { resolveRuntime } from './runtimes/index.mjs';
+import { resolveRuntime, runtimeKind } from './runtimes/index.mjs';
 import { buildRunSpec } from './runtimes/spec.mjs';
 import {
   applyStickyFlags, createSandbox, ensureSandbox, listSandboxNames, loadSandbox,
@@ -143,8 +143,12 @@ export async function cmdUp(argv) {
     die(`'${ctx.cname}' is already running (stop it with: vivary down ${cfg.name})`);
   }
 
-  for (const p of getPlugins()) {
-    if (p.preUp) await p.preUp(ctx);
+  const vm = runtimeKind(cfg.runtime) === 'vm-tart';
+  // vm-tart: no plugin hooks in Phase 2 (hooks assume a Linux container).
+  if (!vm) {
+    for (const p of getPlugins()) {
+      if (p.preUp) await p.preUp(ctx);
+    }
   }
 
   const spec = await buildRunSpec(ctx, {
@@ -154,16 +158,20 @@ export async function cmdUp(argv) {
   // Legacy appended --cap-add ALL before upArgs; here upArgs land in extraArgs and
   // cap-add renders after them. Inert: run flags are position-independent for
   // docker and Apple container, and no upArgs plugin emits caps.
-  for (const p of getPlugins()) {
-    if (p.upArgs) spec.extraArgs.push(...(await p.upArgs(ctx) || []));
+  if (!vm) {
+    for (const p of getPlugins()) {
+      if (p.upArgs) spec.extraArgs.push(...(await p.upArgs(ctx) || []));
+    }
   }
 
   const r = rt.run(spec, { detached: true });
   if (r.status !== 0) die(`${cfg.runtime} run failed: ${r.stderr || r.stdout}`);
 
   console.log(`==> Sandbox '${cfg.name}' is up (runtime: ${cfg.runtime})`);
-  for (const p of getPlugins()) {
-    if (p.postUp) await p.postUp(ctx);
+  if (!vm) {
+    for (const p of getPlugins()) {
+      if (p.postUp) await p.postUp(ctx);
+    }
   }
   console.log(`    Stop with: vivary down ${cfg.name}`);
 }
@@ -190,6 +198,7 @@ export function cmdList() {
   const running = {
     docker: resolveRuntime('docker').runningSet(),
     container: resolveRuntime('container').runningSet(),
+    tart: resolveRuntime('tart').runningSet(),
   };
   const rows = [['NAME', 'AGENT', 'RUNTIME', 'STATUS', 'WORKSPACE']];
   for (const name of names.sort()) {
@@ -212,14 +221,22 @@ export async function cmdRm(argv) {
   const rt = resolveRuntime(cfg.runtime);
   const cname = rt.instanceName(name);
   if (rt.isRunning(name)) rt.stop(cname);
-  rt.rm(cname);
-  console.log(`==> Container removed. Chat history remains in ${path.join(HOME, '.claude/projects')}.`);
+  if (rt.kind === 'vm-tart') {
+    console.log(`==> macOS VM '${cname}' kept — its disk holds the sandbox state (logins, chats).`);
+  } else {
+    rt.rm(cname);
+    console.log(`==> Container removed. Chat history remains in ${path.join(HOME, '.claude/projects')}.`);
+  }
   if (flags.purge) {
     // Explicit --purge in a non-interactive context counts as confirmation.
     const answer = IS_TTY
       ? (await ask(`Really delete sandbox state ${sandboxDir(name)} (credentials, settings, skills)? [y/N]: `)).trim()
       : 'y';
     if (/^y/i.test(answer)) {
+      if (rt.purge) {
+        rt.purge(cname);
+        console.log(`==> macOS VM '${cname}' deleted.`);
+      }
       fs.rmSync(sandboxDir(name), { recursive: true, force: true });
       for (const p of getPlugins()) {
         if (p.onPurge) await p.onPurge(name);
