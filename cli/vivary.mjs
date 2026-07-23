@@ -54,7 +54,7 @@ Commands:
 Core options (start/create/up/shell):
   --name <name>        Sandbox name (default: derived from directory name)
   --workspace <dir>    Workspace directory (default: current directory)
-  --runtime <r>        docker | container — chosen at creation, stored per
+  --runtime <r>        docker | container | tart — chosen at creation, stored per
                        sandbox (default: $SANDBOX_RUNTIME, else autodetect)
   --agent <a>          Default agent for the sandbox
   --memory <m>         Container memory (default: $SANDBOX_MEMORY or 4g)

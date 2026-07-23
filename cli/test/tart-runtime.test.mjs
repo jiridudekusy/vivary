@@ -152,6 +152,20 @@ test('isRunning/runningSet/purge/stop map to tart CLI', () => {
   assert.ok(flat.includes('tart delete vivary-demo'));
 });
 
+test('bootVm stops the VM when boot-readiness wait throws (no orphaned half-booted VM)', () => {
+  const io = fakeIo({
+    listResults: [[]],
+    results: { 'ip vivary-x': { status: 1, stdout: '', stderr: 'no ip' } },
+  });
+  const rt = makeTartRuntime(io.deps);
+  assert.throws(
+    () => rt.run({ name: 'vivary-x', mounts: [], env: {}, command: ['x'] }),
+    /no IP/,
+  );
+  const flat = io.calls.map((c) => c.join(' '));
+  assert.ok(flat.includes('tart stop vivary-x'), `expected a stop call: ${JSON.stringify(flat)}`);
+});
+
 test('collectMacosProvision flattens plugin steps in plugin order', () => {
   const plugins = [
     { name: 'a', macosProvision: ['echo one', 'echo two'] },

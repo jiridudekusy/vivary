@@ -108,7 +108,12 @@ export function bootVm(vm, {
     console.error(`WARNING: ${running} macOS VMs already running — Apple caps concurrent guests at 2; this boot may fail.`);
   }
   spawnDetached(buildTartRunArgv({ name: vm, mounts }), tartLogFile(vm));
-  return waitForVm(vm, { capture, sleep });
+  try {
+    return waitForVm(vm, { capture, sleep });
+  } catch (e) {
+    capture('tart', ['stop', vm]); // don't orphan a half-booted VM
+    throw e;
+  }
 }
 
 // Mount every share at its (same-path) guest destination. Tag ws<i> matches

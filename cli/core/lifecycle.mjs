@@ -101,9 +101,12 @@ export async function cmdStart(argv, forcedAgent) {
   const ctx = makeCtx(cfg, flags, 'start', rt);
   if (rt.isRunning(cfg.name)) {
     console.log(`==> Container already running, attaching (${agent.cmd})...`);
+    const vm = runtimeKind(cfg.runtime) === 'vm-tart';
+    // vm-tart: no broker env in Phase 2 (host integration lands later),
+    // mirroring the buildRunSpec gate on the fresh-start path.
     process.exit(rt.exec(ctx.cname, [agent.cmd, ...rest], {
       interactive: IS_TTY,
-      env: { ...termEnvVars(), ...(await brokerEnvVars(cfg)) },
+      env: { ...termEnvVars(), ...(vm ? {} : await brokerEnvVars(cfg)) },
       cwd: cfg.workspace,
     }));
   }
@@ -119,17 +122,21 @@ export async function cmdShell(argv) {
   const { cfg, flags } = await prepare(argv);
   const rt = resolveRuntime(cfg.runtime);
   const ctx = makeCtx(cfg, flags, 'shell', rt);
+  const vm = runtimeKind(cfg.runtime) === 'vm-tart';
+  // vm-tart: guest shell is zsh (macOS native); containers use bash.
   if (rt.isRunning(cfg.name)) {
-    process.exit(rt.exec(ctx.cname, ['bash'], {
+    // vm-tart: no broker env in Phase 2 (host integration lands later),
+    // mirroring the buildRunSpec gate on the fresh-start path.
+    process.exit(rt.exec(ctx.cname, [vm ? 'zsh' : 'bash'], {
       interactive: IS_TTY,
-      env: { ...termEnvVars(), ...(await brokerEnvVars(cfg)) },
+      env: { ...termEnvVars(), ...(vm ? {} : await brokerEnvVars(cfg)) },
       cwd: cfg.workspace,
     }));
   }
 
   console.log(`==> Runtime: ${cfg.runtime} | shell | workspace: ${cfg.workspace}`);
   const spec = await buildRunSpec(ctx, {
-    rm: true, interactive: IS_TTY, image: IMAGE, command: ['bash'], termEnv: termEnvArgs(),
+    rm: true, interactive: IS_TTY, image: IMAGE, command: [vm ? 'zsh' : 'bash'], termEnv: termEnvArgs(),
   });
   spec.image = rt.ensureImage(spec);
   process.exit(rt.run(spec));
