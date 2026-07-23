@@ -90,24 +90,72 @@ function importSettings(dir) {
 
 // Claude Code stores history under ~/.claude/projects/<slug>, slug = cwd
 // with every non-alphanumeric character replaced by '-'.
-function projectSlug(p) {
+export function projectSlug(p) {
   return path.resolve(p).replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-// Share only the workspace's own history (and its subdirectories') with the
+// Immediate subdirectory names of `dir`, symlinks excluded (isDirectory() is
+// false for a symlink, so the walk never follows one out of the workspace).
+function listSubdirs(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory()).map((e) => e.name);
+}
+
+// The set of history slugs that legitimately belong to this workspace: its own
+// slug plus the slug of every REAL subdirectory (bounded walk). This is the
+// deterministic path->slug direction; we never infer that a projects/ dir
+// belongs here from a string prefix, which would also capture a sibling like
+// `<ws>-secret`. `listDirs` is injected so the walk is unit-testable.
+// (Claude's slug mangling is non-injective — e.g. `<ws>/a-b` and `<ws>/a/b`
+// collide — but that is a Claude-level ambiguity, not a containment bug here.)
+export function workspaceSlugs(workspace, listDirs = listSubdirs, { maxDepth = 8, cap = 2000 } = {}) {
+  const root = path.resolve(workspace);
+  const slugs = new Set([projectSlug(root)]);
+  const queue = [{ dir: root, depth: 0 }];
+  while (queue.length && slugs.size < cap) {
+    const { dir, depth } = queue.shift();
+    let names;
+    try { names = listDirs(dir); } catch { continue; }
+    for (const name of names) {
+      if (['node_modules', '.git', '.hg'].includes(name)) continue;
+      const child = path.join(dir, name);
+      slugs.add(projectSlug(child));
+      if (depth + 1 <= maxDepth) queue.push({ dir: child, depth: depth + 1 });
+    }
+  }
+  return slugs;
+}
+
+// Share only this workspace's own history (and its subdirectories') with the
 // container — NOT the host's entire ~/.claude/projects, which holds chats of
-// unrelated projects. Each matching slug dir is mounted individually under
-// /home/agent/host-projects (a plain dir, so no nested-mount issues); the
-// entrypoint hook symlinks ~/.claude/projects there.
+// unrelated projects. A slug-prefix match alone is unsafe: it also captures
+// sibling projects (`<ws>-secret` matches `<ws>-*`), whose history is
+// read-write once mounted. So prefix candidates are filtered against the slugs
+// of the workspace's REAL subdirectories. Each allowed slug dir is mounted
+// individually under /home/agent/host-projects (a plain dir, so no
+// nested-mount issues); the entrypoint hook symlinks ~/.claude/projects there.
 function projectHistoryMounts(cfg) {
   const projectsRoot = path.join(HOST_CLAUDE_DIR, 'projects');
   const slug = projectSlug(cfg.workspace);
   fs.mkdirSync(path.join(projectsRoot, slug), { recursive: true });
+  const candidates = fs.readdirSync(projectsRoot)
+    .filter((d) => d === slug || d.startsWith(`${slug}-`));
+  // Only the workspace's own slug matched — no subdir slugs to validate, so
+  // skip the (potentially large) workspace walk.
+  const allowed = candidates.some((d) => d !== slug)
+    ? workspaceSlugs(cfg.workspace)
+    : new Set([slug]);
   const args = [];
-  for (const d of fs.readdirSync(projectsRoot)) {
-    if (d === slug || d.startsWith(`${slug}-`)) {
+  const skipped = [];
+  for (const d of candidates) {
+    if (allowed.has(d)) {
       args.push('-v', `${path.join(projectsRoot, d)}:/home/agent/host-projects/${d}`);
+    } else {
+      skipped.push(d);
     }
+  }
+  if (skipped.length) {
+    console.log(`  history: skipped ${skipped.length} project dir(s) matching the slug prefix but not under the workspace`);
   }
   return args;
 }
