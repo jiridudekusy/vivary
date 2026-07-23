@@ -191,6 +191,11 @@ export async function cmdUp(argv) {
       if (p.postUp) await p.postUp(ctx);
     }
   }
+  if (vm) {
+    for (const p of getPlugins()) {
+      if (p.vmPostUp) await p.vmPostUp(ctx);
+    }
+  }
   console.log(`    Stop with: vivary down ${cfg.name}`);
 }
 
