@@ -6,10 +6,25 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { hasCmd } from '../../core/util.mjs';
+import { capture, hasCmd } from '../../core/util.mjs';
 import { containerName } from '../../core/runtime.mjs';
+import { resolveRuntime, runtimeKind } from '../../core/runtimes/index.mjs';
 import { allowedWorkspaces } from '../../core/sandbox.mjs';
-import { brokerLog } from '../../core/broker.mjs';
+import { brokerLog, ensureBroker, sandboxBrokerToken, BROKER_PORT } from '../../core/broker.mjs';
+
+// The `open`/`xdg-open` shim installed into a tart guest: forwards to the host
+// broker (SBX_OPEN_URL/TOKEN come from the agent's exec env). Falls back to the
+// guest's real `open` if the broker is unreachable or the env is absent.
+const TART_OPEN_SHIM = `#!/bin/sh
+[ -n "$SBX_OPEN_URL" ] || exec /usr/bin/open "$@"
+t=""; for a in "$@"; do case "$a" in -*) ;; *) t="$a"; break;; esac; done
+[ -n "$t" ] || exec /usr/bin/open "$@"
+case "$t" in http://*|https://*) act=url;; *) act=path;; esac
+curl -sS --max-time 15 -X POST "$SBX_OPEN_URL" \\
+  --data-urlencode "token=$SBX_OPEN_TOKEN" --data-urlencode "action=$act" \\
+  --data-urlencode "target=$t" --data-urlencode "via=default" >/dev/null 2>&1 \\
+  || exec /usr/bin/open "$@"
+`;
 
 // --- OAuth callback relay -----------------------------------------------------
 const activeRelays = new Map(); // port -> owning sandbox name
@@ -213,6 +228,37 @@ export default {
     },
   },
   needsBroker: (cfg) => !!cfg.hostOpen,
+
+  // tart: the guest reaches the broker at the vmnet gateway (not
+  // host.docker.internal). Point the shim's env there; __GATEWAY__ resolves
+  // after boot. The per-sandbox broker token authorizes the request.
+  async vmContribute(ctx) {
+    const { cfg } = ctx;
+    if (!cfg.hostOpen || runtimeKind(cfg.runtime) !== 'vm-tart') return {};
+    await ensureBroker();
+    return {
+      env: {
+        SBX_OPEN_URL: `http://__GATEWAY__:${BROKER_PORT}/`,
+        SBX_OPEN_TOKEN: sandboxBrokerToken(cfg.name),
+      },
+    };
+  },
+
+  // tart: install the `open`/`xdg-open` shim into the booted guest.
+  async vmPostUp(ctx) {
+    const { cfg } = ctx;
+    if (!cfg.hostOpen) return;
+    const vm = resolveRuntime(cfg.runtime).instanceName(cfg.name);
+    const b64 = Buffer.from(TART_OPEN_SHIM).toString('base64');
+    const install = ['exec', vm, '/bin/zsh', '-lc',
+      `printf '%s' ${JSON.stringify(b64)} | base64 -d | sudo tee /usr/local/bin/open >/dev/null `
+      + `&& sudo chmod 755 /usr/local/bin/open && sudo ln -sf /usr/local/bin/open /usr/local/bin/xdg-open`];
+    if (capture('tart', install).status !== 0) {
+      console.error('WARNING: could not install the host-open shim in the guest');
+    } else {
+      ctx.log('    host-open: `open`/`xdg-open` in the guest now forward to the host.');
+    }
+  },
 
   // POST / with action=url|path
   broker({ req, respond, params, log, sandbox }) {
