@@ -28,6 +28,12 @@ export const globalConfigFile = () => path.join(SANDBOXES_DIR, 'vivary.json');
 
 const SCALAR_KEYS = ['agent', 'runtime', 'memory', 'cpus'];
 
+// Flags that were renamed. Kept only to make the failure precise: an old name
+// still dies loudly (the file is agent-writable — silently remapping it would
+// mean acting on something the user never approved under that name), but the
+// message says exactly what to write instead.
+const RENAMED_FLAGS = { 'own-modules': 'node-modules' };
+
 // --- pure: validation ----------------------------------------------------------
 
 // Validate a parsed config object. `scope` is 'project' | 'global' (the
@@ -55,14 +61,27 @@ export function validateConfig(cfg, { scope = 'project', file = PROJECT_CONFIG_N
       throw new Error(`${file}: 'flags' must be an object of plugin flags`);
     }
     for (const [flag, value] of Object.entries(cfg.flags)) {
-      const type = knownFlags[flag];
-      if (!type) {
+      const def = knownFlags[flag];
+      if (!def) {
+        if (RENAMED_FLAGS[flag]) {
+          throw new Error(`${file}: flag '${flag}' was renamed to '${RENAMED_FLAGS[flag]}' — update the file`);
+        }
         throw new Error(`${file}: unknown flag '${flag}' in 'flags' (known: ${Object.keys(knownFlags).sort().join(', ')})`);
       }
-      const ok = type === 'boolean' ? typeof value === 'boolean'
+      // knownFlags entries are either a bare type string or a full plugin flag
+      // definition (which may allow a list value in addition to its own type).
+      const type = typeof def === 'string' ? def : def.type;
+      const strings = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+      const ok = type === 'list' ? (typeof value === 'string' || strings(value))
+        : type === 'boolean' ? typeof value === 'boolean'
         : type === 'string' ? typeof value === 'string'
-        : ['boolean', 'number', 'string'].includes(typeof value); // 'optional'
-      if (!ok) throw new Error(`${file}: flag '${flag}' has invalid value ${JSON.stringify(value)} (expected ${type})`);
+        : ['boolean', 'number', 'string'].includes(typeof value) // 'optional'
+          || (def.list === true && strings(value));
+      if (!ok) {
+        const expected = type === 'list' ? 'a string or an array of strings'
+          : def.list === true ? `${type} or an array of strings` : type;
+        throw new Error(`${file}: flag '${flag}' has invalid value ${JSON.stringify(value)} (expected ${expected})`);
+      }
     }
   }
   if (cfg.egress !== undefined) {
@@ -176,7 +195,18 @@ export function computeWriteBack(fileCfg, cliFlags, stickyFlagNames = []) {
   for (const flag of stickyFlagNames) {
     const v = cliFlags[flag];
     if (v === undefined || !v) continue; // union only: never write false/0/off
-    if (next.flags?.[flag] !== v) {
+    if (Array.isArray(v)) {
+      // List flags (e.g. --publish) union item-wise, so a CLI port never drops
+      // one the file already declares. Reference compare would rewrite always.
+      if (!v.length) continue;
+      const have = Array.isArray(next.flags?.[flag]) ? next.flags[flag]
+        : typeof next.flags?.[flag] === 'string' ? [next.flags[flag]] : [];
+      const merged = [...have, ...v.filter((x) => !have.includes(x))];
+      if (merged.length === have.length) continue;
+      next.flags = { ...(next.flags || {}) };
+      next.flags[flag] = merged;
+      changed = true;
+    } else if (next.flags?.[flag] !== v) {
       next.flags = { ...(next.flags || {}) };
       next.flags[flag] = v;
       changed = true;

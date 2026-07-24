@@ -53,11 +53,14 @@ export function getPlugins() {
   return loaded;
 }
 
-// Aggregated flag spec for parseArgs (core spec + all plugin flags).
+// Aggregated flag spec for parseArgs (core spec + all plugin flags). A flag
+// declaring `short` keeps the object shape so parseArgs can wire the alias.
 export function pluginFlagSpec() {
   const spec = {};
   for (const p of getPlugins()) {
-    for (const [flag, def] of Object.entries(p.flags || {})) spec[flag] = def.type;
+    for (const [flag, def] of Object.entries(p.flags || {})) {
+      spec[flag] = def.short ? { type: def.type, short: def.short } : def.type;
+    }
   }
   return spec;
 }
@@ -94,7 +97,11 @@ export function pluginHelp() {
   const lines = [];
   for (const p of getPlugins()) {
     for (const [flag, def] of Object.entries(p.flags || {})) {
-      if (def.help) lines.push(`  --${flag}${def.type === 'optional' ? '[=N]' : ''}\n${def.help.replace(/^/gm, '                       ')}`);
+      if (!def.help) continue;
+      const value = def.type === 'optional' ? '[=N]'
+        : def.type === 'list' ? ' <spec>' : def.type === 'string' ? ' <value>' : '';
+      const names = `${def.short ? `-${def.short}, ` : ''}--${flag}${value}`;
+      lines.push(`  ${names}\n${def.help.replace(/^/gm, '                       ')}`);
     }
   }
   return lines.join('\n');

@@ -148,7 +148,7 @@ http://localhost:PORT` in the authorize URL, listens on the host's
 sandbox (via `<runtime> exec curl`, i.e. inside the container's network
 namespace). One login per sandbox, credentials persist.
 
-**Own node_modules** (`--own-modules[=N]`, sticky per sandbox): every
+**Own node_modules** (`--node-modules[=N]`, sticky per sandbox): every
 workspace dir with a `package.json` (scanned N levels deep, default 4, no
 symlink following) gets its `node_modules` overlaid with a per-sandbox
 directory — Linux modules never mix with the host's macOS ones, and the
@@ -158,7 +158,48 @@ virtiofs shares) uses a single share plus in-VM bind mounts, scaling to
 hundreds of packages. New `package.json` files created inside the sandbox
 are picked up **live** by an inotify watcher (overlay lands before the first
 `npm install`). Host-side additions are picked up on restart.
-`--own-modules=0` disables. Overlay failures are loud, never silent.
+`--node-modules=0` disables. Overlay failures are loud, never silent.
+
+In `.vivary.json` the value may instead be an **array of workspace-relative
+dirs** — the exact set to overlay, with no scanning and no live watcher:
+
+```json
+{ "flags": { "node-modules": [".", "apps/web", "packages/lib"] } }
+```
+
+Entries must stay inside the workspace (no absolute paths, no `..`, no
+symlinks) and must exist — a typo fails loudly instead of silently doing
+nothing.
+
+**Published ports** (`-p/--publish HOST:CONTAINER`, sticky, repeatable):
+docker syntax (`-p 8080:80`, `-p 3000`, `-p 0.0.0.0:80:80/tcp`), passed
+straight through to Docker or Apple `container`. One deliberate difference
+from docker: **without a host IP the port binds `127.0.0.1` only**, so a
+service inside an untrusted sandbox does not appear on the LAN by accident —
+write `0.0.0.0:8080:80` when you mean to expose it. In `.vivary.json`:
+`{ "flags": { "publish": ["8080:80", "3000"] } }`. On the `tart` runtime
+there is no publish mechanism (the macOS guest has its own vmnet IP the host
+can reach directly), so vivary prints the guest URL instead.
+
+**Extra mounts** (`-v/--volume HOST[:GUEST][:ro]`, sticky, repeatable):
+docker syntax, and a **bare host path mounts at the same absolute path**
+inside the sandbox (`-v ~/models`, `-v ~/models:ro`) — the same invariant the
+workspace uses. Works on all three runtimes (Docker and Apple `container`
+render `-v`, `tart` renders a virtiofs share mounted at the guest path). The
+host path must exist; a typo fails loudly.
+
+The two sources are **not equally trusted**, because a mount is direct host
+filesystem access and `.vivary.json` is agent-writable:
+
+- `~/.vivary` is refused from either source — it holds every sandbox's broker
+  token and the approved-config baseline, so mounting it would dismantle the
+  approval gate itself.
+- From `.vivary.json`, credential stores and system dirs (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.npmrc`, `~/Library/Keychains`,
+  `/etc`, …) are refused. Pass such a path on the command line if you really
+  mean it — there a human typed it.
+- A CLI mount that *contains* `~/.vivary` (e.g. `-v ~`) is allowed but warns
+  loudly.
 
 **npmrc import** (`--npmrc[=…]`, sticky per sandbox): carries the host
 `~/.npmrc` into the sandbox, re-read on every start (token rotation just
@@ -301,8 +342,8 @@ cli/image/             core image (toolchain) + entrypoint runner
 bench/                 performance benchmarks
 ```
 
-**Architecture**: a small core plus plugins (headed, ssh, docker, host-open,
-clipboard, own-modules, agent-claude, agent-codex). `vivary build` composes
+**Architecture**: a small core plus plugins (headed, ports, ssh, docker,
+host-open, clipboard, node-modules, agent-claude, agent-codex). `vivary build` composes
 ONE fat image from the core Dockerfile and every plugin fragment; features
 activate at runtime via env variables, so a single image serves all
 sandboxes. The container entrypoint just runs `/etc/entrypoint.d/*.sh` —

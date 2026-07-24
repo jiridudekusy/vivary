@@ -30,9 +30,28 @@ English, converse with the user in Czech.
 - `cli/plugins/<name>/` — one feature per plugin: `plugin.mjs` (host side:
   flags, runArgs/upArgs/postUp/onCreate/onPurge, needsBroker/needsCaps,
   broker routes, agents/launchers) + `image.dockerfile` fragment + `rootfs/`
-  + `entrypoint.d/` hooks. Plugins: egress(5), sudo(16), headed(20), ssh(30),
-  tailscale(35), docker(40), npmrc(45), host-open(50), clipboard(60),
-  own-modules(70), agent-claude(80), agent-codex(85), agent-cursor(90).
+  + `entrypoint.d/` hooks. Plugins: egress(5), sudo(16), headed(20),
+  ports(25), mounts(26), ssh(30), tailscale(35), docker(40), npmrc(45),
+  host-open(50), clipboard(60), node-modules(70), agent-claude(80),
+  agent-codex(85), agent-cursor(90).
+  mounts: `-v/--volume HOST[:GUEST][:ro]`, bare path = SAME path in the
+  sandbox; works on all 3 runtimes (RunSpec.mounts is structural, tart renders
+  virtiofs). SECURITY — a mount is raw host FS access and `.vivary.json` is
+  agent-writable, so origin matters: `~/.vivary` refused from BOTH (it holds
+  every sandbox's broker token + the approved-config baseline → mounting it
+  breaks the approval gate), credential stores/system dirs refused from the
+  FILE only (deny-list in the plugin), CLI mounts allowed but warned when they
+  contain `~/.vivary`. The origin reaches the plugin via
+  `normalize(v, {origin})` — `overlayConfigFlags` must be given cliFlags to
+  tell them apart, since effective.flags already has CLI overlaid on file.
+  ports: `-p/--publish` docker-syntax, but a missing
+  host-ip binds 127.0.0.1 (not 0.0.0.0) — a sandbox service must not land on
+  the LAN by accident; tart has no publish at all, so there it only prints
+  the guest URL. node-modules: `--node-modules[=N]` scans, or an explicit
+  array of workspace-relative dirs in `.vivary.json` (exact list, live
+  watcher off). Flag types: `boolean|optional|string|list`; `list` is
+  repeatable and may carry a `short` alias, and `list: true` on another type
+  lets that flag also take an array in `.vivary.json`.
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
   egress plugin: `--egress` forces all outbound through a shared, dual-homed
   ASHP transparent MITM proxy (`ashp.mjs`, lazy-started like the broker; state
@@ -64,7 +83,7 @@ English, converse with the user in Czech.
   with Docker + `container image load` (SANDBOX_NATIVE_BUILD=1 forces
   native). Runtime gateway DNS mishandles AAAA → fix-net adds
   `options no-aaaa`. No host.docker.internal → fix-net maps it to gateway.
-  ~120 virtiofs mount limit → own-modules uses 1 share + in-VM binds
+  ~120 virtiofs mount limit → node-modules uses 1 share + in-VM binds
   (needs `--cap-add ALL`). Chromium spawned via `container exec` renders
   white/corrupt into Xvfb — GUI must run in the main process tree. Default
   VM: 1 GB/4 CPU → vivary defaults 4 GB/4.

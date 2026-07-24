@@ -6,8 +6,14 @@ import {
   unifiedDiff, validateConfig,
 } from '../core/config.mjs';
 
+// Entries are either a bare type string (as before) or a full plugin flag def —
+// validateConfig accepts both, and only a def can declare `list`.
 const KNOWN_FLAGS = {
-  egress: 'boolean', sudo: 'boolean', 'host-open': 'boolean', 'own-modules': 'optional',
+  egress: 'boolean',
+  sudo: 'boolean',
+  'host-open': 'boolean',
+  'node-modules': { type: 'optional', list: true },
+  publish: { type: 'list' },
 };
 
 // --- validateConfig -------------------------------------------------------------
@@ -15,9 +21,28 @@ const KNOWN_FLAGS = {
 test('validateConfig accepts the documented schema', () => {
   validateConfig({
     agent: 'claude', runtime: 'container', memory: '8g', cpus: '6',
-    flags: { egress: true, sudo: false, 'own-modules': 6 },
+    flags: { egress: true, sudo: false, 'node-modules': 6 },
     egress: { presets: ['anthropic'], allow: ['https://registry.npmjs.org/*'] },
   }, { knownFlags: KNOWN_FLAGS });
+});
+
+test('validateConfig accepts a list flag as an array or a single string', () => {
+  validateConfig({ flags: { publish: ['8080:80', '3000'] } }, { knownFlags: KNOWN_FLAGS });
+  validateConfig({ flags: { publish: '8080:80' } }, { knownFlags: KNOWN_FLAGS });
+  assert.throws(() => validateConfig({ flags: { publish: [8080] } }, { knownFlags: KNOWN_FLAGS }),
+    /flag 'publish' has invalid value \[8080\] \(expected a string or an array of strings\)/);
+});
+
+test('validateConfig accepts an array of dirs for node-modules (list: true)', () => {
+  validateConfig({ flags: { 'node-modules': ['.', 'apps/web'] } }, { knownFlags: KNOWN_FLAGS });
+  // ...but a list is NOT allowed for a flag that did not opt in
+  assert.throws(() => validateConfig({ flags: { sudo: ['x'] } }, { knownFlags: KNOWN_FLAGS }),
+    /flag 'sudo' has invalid value/);
+});
+
+test('validateConfig names the new flag when an old (renamed) one is used', () => {
+  assert.throws(() => validateConfig({ flags: { 'own-modules': 4 } }, { knownFlags: KNOWN_FLAGS }),
+    /flag 'own-modules' was renamed to 'node-modules'/);
 });
 
 test('validateConfig dies loudly on unknown top-level key (typo protection)', () => {
@@ -121,7 +146,7 @@ test('unifiedDiff against empty shows the whole file as added', () => {
 
 // --- computeWriteBack -----------------------------------------------------------
 
-const STICKY = ['egress', 'sudo', 'host-open', 'own-modules'];
+const STICKY = ['egress', 'sudo', 'host-open', 'node-modules', 'publish'];
 
 test('write-back adds a newly enabled CLI flag (union)', () => {
   const { config, changed } = computeWriteBack(
@@ -132,9 +157,28 @@ test('write-back adds a newly enabled CLI flag (union)', () => {
 
 test('write-back never removes or downgrades (falsy CLI values skipped)', () => {
   const { config, changed } = computeWriteBack(
-    { flags: { egress: true, sudo: true } }, { egress: false, 'own-modules': 0 }, STICKY);
+    { flags: { egress: true, sudo: true } }, { egress: false, 'node-modules': 0 }, STICKY);
   assert.equal(changed, false);
   assert.deepEqual(config.flags, { egress: true, sudo: true });
+});
+
+test('write-back unions list flags item-wise instead of replacing them', () => {
+  const { config, changed } = computeWriteBack(
+    { flags: { publish: ['8080:80'] } }, { publish: ['3000:3000'] }, STICKY);
+  assert.equal(changed, true);
+  assert.deepEqual(config.flags.publish, ['8080:80', '3000:3000']);
+});
+
+test('write-back is a no-op when every CLI list item is already in the file', () => {
+  const { changed } = computeWriteBack(
+    { flags: { publish: ['8080:80', '3000'] } }, { publish: ['3000'] }, STICKY);
+  assert.equal(changed, false); // reference compare would rewrite the file here
+});
+
+test('write-back promotes a single-string list value to an array on merge', () => {
+  const { config } = computeWriteBack(
+    { flags: { publish: '8080:80' } }, { publish: ['3000'] }, STICKY);
+  assert.deepEqual(config.flags.publish, ['8080:80', '3000']);
 });
 
 test('write-back updates differing memory/cpus/agent from CLI', () => {

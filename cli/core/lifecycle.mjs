@@ -58,6 +58,19 @@ async function vmContribute(ctx) {
   return merged;
 }
 
+// vm-tart: `up` runs the vmPostUp hooks (host-open shim, ssh registration,
+// published-port info) after boot. A cold `start`/`shell` boots the very same
+// VM, so it needs them too — without this, `open` in a guest started that way
+// silently falls back to the guest's own /usr/bin/open. Idempotent, and a no-op
+// on container runtimes (no ensureUp).
+async function vmBootAndPostUp(rt, spec, ctx) {
+  if (runtimeKind(ctx.cfg.runtime) !== 'vm-tart' || !rt.ensureUp) return;
+  rt.ensureUp(spec);
+  for (const p of getPlugins()) {
+    if (p.vmPostUp) await p.vmPostUp(ctx);
+  }
+}
+
 // Fold a vmContribute result into a RunSpec (no-op shape for containers).
 function applyVmContribute(spec, c) {
   spec.tartRunArgs = c.runArgs;
@@ -78,7 +91,9 @@ async function prepare(argv, opts = {}) {
   // Config files: project .vivary.json wins entirely over the global
   // defaults (~/.vivary/vivary.json) — the two never merge. Loading dies
   // loudly on invalid JSON / unknown keys.
-  const knownFlags = pluginFlagSpec();
+  // Full defs (not just types): the validator needs `list` to know which flags
+  // also accept an array of strings in the file.
+  const knownFlags = pluginFlagDefs();
   const project = loadProjectConfig(workspace, knownFlags);
   const globalCfg = project ? null : loadGlobalConfig(knownFlags);
   const effective = resolveEffectiveConfig({
@@ -99,7 +114,7 @@ async function prepare(argv, opts = {}) {
 
   // File values override sticky sandbox.json values for this invocation
   // (in-memory; effective.flags already has CLI flags overlaid on top).
-  overlayConfigFlags(cfg, effective.flags);
+  overlayConfigFlags(cfg, effective.flags, cliFlags);
   if (effective.runtime && effective.runtime !== cfg.runtime) {
     cfg.runtime = effective.runtime;
   }
@@ -144,6 +159,7 @@ export async function cmdStart(argv, forcedAgent) {
   });
   spec.image = rt.ensureImage(spec);
   applyVmContribute(spec, contrib);
+  await vmBootAndPostUp(rt, spec, ctx);
   process.exit(rt.run(spec));
 }
 
@@ -168,6 +184,7 @@ export async function cmdShell(argv) {
   });
   spec.image = rt.ensureImage(spec);
   applyVmContribute(spec, contrib);
+  await vmBootAndPostUp(rt, spec, ctx);
   process.exit(rt.run(spec));
 }
 

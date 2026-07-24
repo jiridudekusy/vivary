@@ -101,10 +101,27 @@ export function sanitizeName(s) {
 // Tiny flag parser: known flags per spec ('string' | 'boolean' | 'optional'),
 // `--key=value` form supported, `--` starts passthrough args, unknown tokens
 // land in positionals (or passthrough when unknownToRest).
+// A spec entry is either a bare type string or { type, short } — `short` adds a
+// single-dash alias (`-p` for --publish, docker-style). Type 'list' is
+// repeatable: every occurrence appends, and a value may itself be a
+// comma-separated list, so the flag always normalizes to an array.
 export function parseArgs(argv, spec, { unknownToRest = false } = {}) {
+  const typeOf = (key) => (typeof spec[key] === 'string' ? spec[key] : spec[key]?.type);
+  const shortFor = {};
+  for (const [key, def] of Object.entries(spec)) {
+    if (def && typeof def === 'object' && def.short) shortFor[def.short] = key;
+  }
   const flags = {};
   const positionals = [];
   const rest = [];
+  const set = (key, value) => {
+    if (typeOf(key) !== 'list') {
+      flags[key] = value;
+      return;
+    }
+    const items = String(value).split(',').map((s) => s.trim()).filter(Boolean);
+    flags[key] = [...(flags[key] || []), ...items];
+  };
   let i = 0;
   while (i < argv.length) {
     const tok = argv[i];
@@ -112,20 +129,27 @@ export function parseArgs(argv, spec, { unknownToRest = false } = {}) {
       rest.push(...argv.slice(i + 1));
       break;
     }
+    const short = /^-[^-]/.test(tok) ? shortFor[tok.slice(1, 2)] : null;
     const eq = tok.startsWith('--') ? tok.indexOf('=') : -1;
     const bare = eq === -1 ? tok : tok.slice(0, eq);
-    const known = bare.startsWith('--') && spec[bare.slice(2)];
+    const known = (bare.startsWith('--') && spec[bare.slice(2)]) || short;
     if (known) {
-      const key = bare.slice(2);
-      if (eq !== -1) {
-        flags[key] = tok.slice(eq + 1);
+      // `-pVALUE` and `-p VALUE` both work, like docker's own short flags.
+      const key = short || bare.slice(2);
+      const inlineShort = short && tok.length > 2 ? tok.slice(2) : null;
+      const type = typeOf(key);
+      if (inlineShort !== null && inlineShort !== undefined) {
+        set(key, inlineShort);
         i += 1;
-      } else if (spec[key] === 'boolean' || spec[key] === 'optional') {
+      } else if (eq !== -1) {
+        set(key, tok.slice(eq + 1));
+        i += 1;
+      } else if (type === 'boolean' || type === 'optional') {
         flags[key] = true;
         i += 1;
       } else {
         if (argv[i + 1] === undefined) die(`missing value for --${key}`);
-        flags[key] = argv[i + 1];
+        set(key, argv[i + 1]);
         i += 2;
       }
     } else if (tok.startsWith('-') && unknownToRest) {

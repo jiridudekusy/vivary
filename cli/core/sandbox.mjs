@@ -9,12 +9,24 @@ export function sandboxDir(name) {
   return path.join(SANDBOXES_DIR, name);
 }
 
+// Rename the own-modules sticky key in place. Unlike .vivary.json (agent-
+// writable, so an old flag name dies loudly there), sandbox.json is host-only
+// state: migrating it silently is safe, and NOT migrating would quietly turn
+// the overlays off for every existing sandbox.
+export function migrateLegacyKeys(json, jsonFile, write = fs.writeFileSync) {
+  if (json.ownModules === undefined || json.nodeModules !== undefined) return json;
+  const { ownModules, ...rest } = json;
+  const migrated = { ...rest, nodeModules: ownModules };
+  write(jsonFile, JSON.stringify(migrated, null, 2));
+  return migrated;
+}
+
 // Load sandbox config; migrates legacy sandbox.env (bash era) to sandbox.json.
 export function loadSandbox(name) {
   const dir = sandboxDir(name);
   const jsonFile = path.join(dir, 'sandbox.json');
   const json = readJson(jsonFile);
-  if (json) return json;
+  if (json) return migrateLegacyKeys(json, jsonFile);
   const envFile = path.join(dir, 'sandbox.env');
   if (fs.existsSync(envFile)) {
     const env = Object.fromEntries(
@@ -66,10 +78,22 @@ export function resolveName(explicit, workspace) {
 
 // Normalize a raw flag value using the plugin flag definition. Default:
 // boolean presence. 'optional' flags may carry a value (--flag=N).
-function normalizeFlag(def, value) {
+//
+// `origin` tells normalize where the value came from: 'cli' means a human typed
+// it, 'file' means it came from .vivary.json — which the agent inside the
+// sandbox can write. Flags that hand out host access (mounts) trust the two
+// differently, so the distinction has to survive down to normalize.
+function normalizeFlag(def, value, origin = 'cli') {
   if (value === undefined) return undefined;
-  if (def.normalize) return def.normalize(value);
+  if (def.normalize) return def.normalize(value, { origin });
   return !!value;
+}
+
+// Sticky values may be arrays (list flags like --publish), so a reference
+// compare would report a change on every run and rewrite sandbox.json.
+function sameStickyValue(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);
+  return a === b;
 }
 
 // Apply sticky plugin flags to a sandbox config, persisting changes.
@@ -80,7 +104,7 @@ export function applyStickyFlags(cfg, flags) {
       if (!def.sticky || flags[flag] === undefined) continue;
       const key = def.cfgKey || flag;
       const next = normalizeFlag(def, flags[flag]);
-      if (cfg[key] !== next) {
+      if (!sameStickyValue(cfg[key], next)) {
         cfg[key] = next;
         changed = true;
       }
@@ -95,11 +119,15 @@ export function applyStickyFlags(cfg, flags) {
 // flag from the file takes effect on the next run (values may still reach
 // sandbox.json via unrelated saves — e.g. tailscale persisting its port —
 // which is harmless: overlaid values passed the approval gate).
-export function overlayConfigFlags(cfg, fileFlags = {}) {
+// `fileFlags` arrives with CLI flags already overlaid on top (that is the
+// effective set for this invocation), so `cliFlags` is what tells the two apart
+// — without it a value the human typed would be judged as agent-written.
+export function overlayConfigFlags(cfg, fileFlags = {}, cliFlags = {}) {
   for (const p of getPlugins()) {
     for (const [flag, def] of Object.entries(p.flags || {})) {
       if (!def.sticky || fileFlags[flag] === undefined) continue;
-      cfg[def.cfgKey || flag] = normalizeFlag(def, fileFlags[flag]);
+      const origin = cliFlags[flag] === undefined ? 'file' : 'cli';
+      cfg[def.cfgKey || flag] = normalizeFlag(def, fileFlags[flag], origin);
     }
   }
 }

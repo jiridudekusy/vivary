@@ -253,6 +253,9 @@ export function makeTartRuntime({
       const env = withGateway(opts.env || {}, vm, capture);
       return runInherit('tart', buildGuestExecArgv(vm, argv, { ...opts, env }));
     },
+    // Boot (+ mount + guest env) without attaching, so the lifecycle can run
+    // the vmPostUp hooks on the start/shell paths too, not just on `up`.
+    ensureUp(spec) { ensureBooted(spec); },
     stop(vm) { return capture('tart', ['stop', vm]); },
     // The VM disk IS the sandbox state (in-guest logins, chats) — plain rm
     // keeps it; purge deletes it. Lifecycle prints the kind-aware message.
