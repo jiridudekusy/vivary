@@ -1,7 +1,7 @@
 // Sandbox registry: per-sandbox config, creation, sticky flags.
 import fs from 'node:fs';
 import path from 'node:path';
-import { HOME, IS_TTY, SANDBOXES_DIR, die, readJson, sanitizeName } from './util.mjs';
+import { HOME, IS_TTY, SANDBOXES_DIR, die, hostPortFree, readJson, sanitizeName } from './util.mjs';
 import { detectRuntime } from './runtime.mjs';
 import { getPlugins } from './plugins.mjs';
 
@@ -57,6 +57,42 @@ export function listSandboxNames() {
     return fs.statSync(dir).isDirectory()
       && (fs.existsSync(path.join(dir, 'sandbox.json')) || fs.existsSync(path.join(dir, 'sandbox.env')));
   });
+}
+
+// sandbox.json keys holding a host port vivary published for a sandbox. Every
+// assignment checks all of them across all sandboxes, so two features (plain
+// sshd publish, tailnet-facing sshd publish) can never hand out the same port.
+const PORT_KEYS = ['sshPort', 'tsSshPort'];
+
+// Stable per-sandbox host port, persisted in sandbox.json so ~/.ssh/config and
+// known_hosts stay valid across restarts. `preferred` is taken when nothing
+// claims it (a single-sandbox setup keeps the familiar 2222); otherwise a
+// deterministic name-derived candidate, stepped until one is free. A FIXED port
+// was the bug: two sandboxes on docker at once died with "Bind for
+// 0.0.0.0:2222 failed: port is already allocated".
+export async function assignStablePort(cfg, {
+  key, base, span = 900, preferred = null, isFree = hostPortFree,
+} = {}) {
+  if (cfg[key]) return cfg[key];
+  const used = new Set(listSandboxNames()
+    .filter((n) => n !== cfg.name)
+    .flatMap((n) => {
+      const json = readJson(path.join(sandboxDir(n), 'sandbox.json')) || {};
+      return PORT_KEYS.map((k) => json[k]).filter(Boolean);
+    }));
+  const hashed = [...cfg.name].reduce((a, c) => a + c.charCodeAt(0), 0) % span;
+  const candidates = [
+    ...(preferred ? [preferred] : []),
+    ...Array.from({ length: span }, (_, i) => base + ((hashed + i) % span)),
+  ];
+  for (const port of candidates) {
+    if (used.has(port)) continue;
+    if (!(await isFree(port))) continue;
+    cfg[key] = port;
+    saveSandbox(cfg);
+    return port;
+  }
+  return die(`no free host port for '${key}' in range ${base}-${base + span - 1}`);
 }
 
 export function allowedWorkspaces() {

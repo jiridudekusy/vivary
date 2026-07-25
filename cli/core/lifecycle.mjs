@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, die, parseArgs, sanitizeName } from './util.mjs';
 import { termEnvArgs, termEnvVars } from './runtime.mjs';
-import { resolveRuntime, runtimeKind } from './runtimes/index.mjs';
+import { resolveRuntime, runtimeKind, runtimesRunning } from './runtimes/index.mjs';
 import { buildRunSpec } from './runtimes/spec.mjs';
 import {
   applyStickyFlags, createSandbox, ensureSandbox, listSandboxNames, loadSandbox,
@@ -239,13 +239,19 @@ export function cmdDown(argv) {
   const { flags, positionals } = parseArgs(argv, { name: 'string' });
   const name = flags.name || positionals[0] || sanitizeName(path.basename(process.cwd()));
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
-  const rt = resolveRuntime(cfg.runtime);
-  if (!rt.isRunning(name)) {
+  // Stop it wherever it actually runs, not where sandbox.json says (a project
+  // .vivary.json can override the runtime for a start — see runtimesRunning).
+  const running = runtimesRunning(name);
+  if (!running.length) {
     console.log(`Sandbox '${name}' is not running.`);
     return;
   }
-  rt.stop(rt.instanceName(name));
-  console.log(`==> Sandbox '${name}' stopped (state and chats are preserved).`);
+  for (const rtName of running) {
+    const rt = resolveRuntime(rtName);
+    rt.stop(rt.instanceName(name));
+    const where = rtName === cfg.runtime ? '' : ` (runtime: ${rtName}, sandbox.json says ${cfg.runtime})`;
+    console.log(`==> Sandbox '${name}' stopped${where} (state and chats are preserved).`);
+  }
 }
 
 export function cmdList() {
@@ -263,9 +269,16 @@ export function cmdList() {
   for (const name of names.sort()) {
     const cfg = loadSandbox(name);
     if (!cfg) continue;
-    const rt = running[cfg.runtime] ? resolveRuntime(cfg.runtime) : null;
-    const status = rt && running[cfg.runtime].has(rt.instanceName(name)) ? 'running' : 'stopped';
-    rows.push([name, cfg.agent || 'claude', cfg.runtime || '?', status, cfg.workspace || '?']);
+    // Look in every runtime, not only the recorded one: a .vivary.json runtime
+    // override starts the sandbox elsewhere, which used to read as 'stopped'.
+    const holders = Object.keys(running)
+      .filter((n) => running[n].has(resolveRuntime(n).instanceName(name)));
+    const elsewhere = holders.filter((n) => n !== cfg.runtime);
+    const runtimeCell = elsewhere.length
+      ? `${cfg.runtime || '?'} (as ${elsewhere.join(', ')})`
+      : cfg.runtime || '?';
+    rows.push([name, cfg.agent || 'claude', runtimeCell,
+      holders.length ? 'running' : 'stopped', cfg.workspace || '?']);
   }
   const widths = rows[0].map((_, c) => Math.max(...rows.map((r) => String(r[c]).length)));
   for (const row of rows) {
@@ -277,14 +290,27 @@ export async function cmdRm(argv) {
   const { flags, positionals } = parseArgs(argv, { name: 'string', purge: 'boolean' });
   const name = flags.name || positionals[0] || sanitizeName(path.basename(process.cwd()));
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
-  const rt = resolveRuntime(cfg.runtime);
-  const cname = rt.instanceName(name);
-  if (rt.isRunning(name)) rt.stop(cname);
-  if (rt.kind === 'vm-tart') {
-    console.log(`==> macOS VM '${cname}' kept — its disk holds the sandbox state (logins, chats).`);
-  } else {
-    rt.rm(cname);
+  // Sweep every runtime the sandbox is actually in, not just the recorded one:
+  // a .vivary.json runtime override starts it elsewhere, and removing only the
+  // recorded runtime left that container running (state purged, container up).
+  const targets = [...new Set([cfg.runtime, ...runtimesRunning(name)])];
+  const vmTargets = targets.filter((n) => runtimeKind(n) === 'vm-tart');
+  const stray = targets.filter((n) => n !== cfg.runtime);
+  for (const rtName of targets) {
+    const rt = resolveRuntime(rtName);
+    const cname = rt.instanceName(name);
+    if (rt.isRunning(name)) rt.stop(cname);
+    if (rt.kind !== 'vm-tart') rt.rm(cname); // silent when there is nothing there
+  }
+  if (stray.length) {
+    console.log(`==> Also found under runtime(s) ${stray.join(', ')} — removed there too.`);
+  }
+  if (targets.some((n) => runtimeKind(n) !== 'vm-tart')) {
     console.log(`==> Container removed. Chat history remains in ${path.join(HOME, '.claude/projects')}.`);
+  }
+  for (const rtName of vmTargets) {
+    console.log(`==> macOS VM '${resolveRuntime(rtName).instanceName(name)}' kept — `
+      + 'its disk holds the sandbox state (logins, chats).');
   }
   if (flags.purge) {
     // Explicit --purge in a non-interactive context counts as confirmation.
@@ -292,9 +318,10 @@ export async function cmdRm(argv) {
       ? (await ask(`Really delete sandbox state ${sandboxDir(name)} (credentials, settings, skills)? [y/N]: `)).trim()
       : 'y';
     if (/^y/i.test(answer)) {
-      if (rt.purge) {
-        rt.purge(cname);
-        console.log(`==> macOS VM '${cname}' deleted.`);
+      for (const rtName of vmTargets) {
+        const rt = resolveRuntime(rtName);
+        const cname = rt.instanceName(name);
+        if (rt.purge?.(cname).status === 0) console.log(`==> macOS VM '${cname}' deleted.`);
       }
       fs.rmSync(sandboxDir(name), { recursive: true, force: true });
       for (const p of getPlugins()) {

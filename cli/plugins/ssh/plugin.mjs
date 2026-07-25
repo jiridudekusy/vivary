@@ -7,7 +7,7 @@ import path from 'node:path';
 import { HOME, capture, die, hasCmd, parseArgs } from '../../core/util.mjs';
 import { containerName, containerDnsDomain } from '../../core/runtime.mjs';
 import { resolveRuntime } from '../../core/runtimes/index.mjs';
-import { ensureSandbox } from '../../core/sandbox.mjs';
+import { assignStablePort, ensureSandbox } from '../../core/sandbox.mjs';
 import { cmdUp } from '../../core/lifecycle.mjs';
 
 function registerKnownHosts(dir, host, port) {
@@ -179,8 +179,18 @@ export default {
     if (domain) {
       ctx.ssh = { host: `${cname}.${domain}`, port: '22' };
     } else {
-      ctx.ssh = { host: 'localhost', port: process.env.SSH_PORT || '2222' };
-      args.push('-p', `${ctx.ssh.port}:22`);
+      // Docker has no per-container DNS name, so sshd is published on the host.
+      // The port is per-sandbox and persisted (2222 while it is free, so a
+      // single-sandbox setup is unchanged): a fixed 2222 made the SECOND docker
+      // sandbox fail to start with "port is already allocated". Bound to
+      // loopback, since the ~/.ssh/config alias and `vivary ide` connect
+      // locally — EXCEPT with --tailscale, where reaching the sandbox from
+      // another tailnet device is the whole point (on docker that plugin reuses
+      // this publish instead of adding its own).
+      const port = process.env.SSH_PORT
+        || await assignStablePort(cfg, { key: 'sshPort', base: 2222, preferred: 2222 });
+      ctx.ssh = { host: 'localhost', port: String(port) };
+      args.push('-p', `${cfg.tailscale ? '0.0.0.0' : '127.0.0.1'}:${port}:22`);
     }
     return args;
   },

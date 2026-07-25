@@ -53,6 +53,15 @@ English, converse with the user in Czech.
   repeatable and may carry a `short` alias, and `list: true` on another type
   lets that flag also take an array in `.vivary.json`.
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
+  ssh publish (docker only — Apple has per-container DNS): per-sandbox port via
+  core `assignStablePort` (sandbox.json `sshPort`/`tsSshPort`, prefers 2222 when
+  free, probes the host, avoids other sandboxes' ports) — a FIXED 2222 made the
+  second docker sandbox die with "port is already allocated". Bound to
+  127.0.0.1 unless `--tailscale` (tailnet devices must reach it).
+  down/rm/ls resolve the runtime via `runtimesRunning()` instead of trusting
+  sandbox.json: a project `.vivary.json` may override `runtime` and that applies
+  in memory only, so the instance can live in another runtime than the registry
+  records (this left a container running after `rm --purge`).
   egress plugin: `--egress` forces all outbound through a shared, dual-homed
   ASHP transparent MITM proxy (`ashp.mjs`, lazy-started like the broker; state
   in `~/.vivary/.ashp/`); default-deny + per-request approval UI

@@ -277,7 +277,13 @@ the config alias `claude-sandbox-<name>` as the host.
   the first obtained value wins, and a global `UserKnownHostsFile /dev/null`
   later in the file would break Desktop's host verification.
 - Apple `container`: direct connection to `claude-sandbox-<name>.<dns-domain>:22`
-  (no published ports, no conflicts). Docker: `localhost:2222` (`SSH_PORT=`).
+  (no published ports, no conflicts). Docker publishes sshd on a **per-sandbox
+  port** (`127.0.0.1:2222` for the first sandbox, then a stable name-derived one
+  — several docker sandboxes can run at once), overridable with `SSH_PORT=`.
+  The port is persisted in `sandbox.json` and written into the `~/.ssh/config`
+  alias, so `ssh claude-sandbox-<name>` and `vivary ide` keep working. It binds
+  loopback only; `--tailscale` publishes on all interfaces so other tailnet
+  devices can reach it.
 - Non-interactive SSH sessions get `CLAUDE_CONFIG_DIR`, `PLAYWRIGHT_BROWSERS_PATH`,
   `DISPLAY` and PATH via `sshd_config SetEnv`.
 - The Desktop remote daemon's unix sockets can't be chmod'ed on the virtiofs

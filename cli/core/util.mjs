@@ -1,5 +1,6 @@
 // Shared utilities and constants.
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -91,6 +92,19 @@ export function readJson(file, fallback = null) {
 export function ask(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => rl.question(question, (a) => { rl.close(); resolve(a); }));
+}
+
+// Is this host port bindable right now? Used when assigning a per-sandbox
+// published port: the registry only knows ports vivary itself handed out, so
+// probe before claiming one (a stray docker publish or any other listener would
+// otherwise surface much later as "port is already allocated" on run).
+export function hostPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(false));
+    srv.once('listening', () => srv.close(() => resolve(true)));
+    srv.listen(port, '0.0.0.0');
+  });
 }
 
 export function sanitizeName(s) {

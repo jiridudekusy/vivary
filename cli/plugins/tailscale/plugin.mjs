@@ -13,8 +13,8 @@
 // (container IPs are host-internal).
 import fs from 'node:fs';
 import path from 'node:path';
-import { capture, hasCmd, readJson } from '../../core/util.mjs';
-import { listSandboxNames, sandboxDir, saveSandbox } from '../../core/sandbox.mjs';
+import { capture, hasCmd } from '../../core/util.mjs';
+import { assignStablePort } from '../../core/sandbox.mjs';
 
 function tailscaleBin() {
   if (hasCmd('tailscale')) return 'tailscale';
@@ -46,20 +46,10 @@ function hostsLines(status) {
   return lines;
 }
 
-// Stable per-sandbox port for the tailnet-facing sshd publish.
-function assignSshPort(cfg) {
-  if (cfg.tsSshPort) return cfg.tsSshPort;
-  const used = new Set(
-    listSandboxNames()
-      .map((n) => readJson(path.join(sandboxDir(n), 'sandbox.json'))?.tsSshPort)
-      .filter(Boolean)
-  );
-  let port = 22000 + [...cfg.name].reduce((a, c) => a + c.charCodeAt(0), 0) % 900;
-  while (used.has(port)) port += 1;
-  cfg.tsSshPort = port;
-  saveSandbox(cfg);
-  return port;
-}
+// Stable per-sandbox port for the tailnet-facing sshd publish. The core helper
+// also avoids ports handed to the plain ssh publish and probes the host, so the
+// two features can't collide.
+const assignSshPort = (cfg) => assignStablePort(cfg, { key: 'tsSshPort', base: 22000 });
 
 export default {
   name: 'tailscale',
@@ -87,12 +77,12 @@ export default {
     return ['-e', 'SANDBOX_TAILSCALE=1'];
   },
 
-  upArgs(ctx) {
+  async upArgs(ctx) {
     const { cfg } = ctx;
     if (!cfg.tailscale) return [];
     ctx.tsStatus = tailscaleStatus();
     if (cfg.runtime === 'docker') return []; // ssh plugin already publishes
-    const port = assignSshPort(cfg);
+    const port = await assignSshPort(cfg);
     return ['-p', `${port}:22`];
   },
 
@@ -100,8 +90,10 @@ export default {
     const { cfg } = ctx;
     if (!cfg.tailscale || !ctx.tsStatus) return;
     const selfFqdn = (ctx.tsStatus.Self?.DNSName || '').replace(/\.$/, '');
+    // docker: the ssh plugin owns the publish, so report ITS port (no longer a
+    // hardcoded 2222 — it is per-sandbox now).
     const port = cfg.runtime === 'docker'
-      ? (process.env.SSH_PORT || '2222')
+      ? (process.env.SSH_PORT || cfg.sshPort || '2222')
       : cfg.tsSshPort;
     ctx.log(`    Tailnet:   ssh -p ${port} agent@${selfFqdn}
                (identity file: ~/.vivary/${cfg.name}/ssh/id_ed25519 on this host;
