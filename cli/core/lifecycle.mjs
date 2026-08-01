@@ -335,10 +335,35 @@ export async function cmdRm(argv) {
 }
 
 export async function cmdCreate(argv) {
-  const { flags, positionals } = parseArgs(argv, flagSpec());
-  const workspace = path.resolve(flags.workspace || positionals[1] || process.cwd());
-  const name = flags.name || positionals[0] || sanitizeName(path.basename(workspace));
-  await createSandbox(name, workspace, { ...flags, interactive: true });
+  const { flags: cliFlags, positionals } = parseArgs(argv, flagSpec());
+  const workspace = path.resolve(cliFlags.workspace || positionals[1] || process.cwd());
+  const name = cliFlags.name || positionals[0] || sanitizeName(path.basename(workspace));
+
+  // Seed the new sandbox from the global defaults (~/.vivary/vivary.json), so
+  // `create` matches what start/up would use and the onCreate wizards see the
+  // real flags. That file is host-owned (never mounted, not agent-writable),
+  // hence no approval gate. A project .vivary.json wins over the global file
+  // entirely — but it IS agent-writable, so it must pass the approval gate,
+  // which needs the sandbox to exist; it is therefore applied on first start.
+  const knownFlags = pluginFlagDefs();
+  const project = loadProjectConfig(workspace, knownFlags);
+  const globalCfg = project ? null : loadGlobalConfig(knownFlags);
+  const opts = { ...cliFlags, interactive: true };
+  if (globalCfg) {
+    const effective = resolveEffectiveConfig({ cliFlags, global: globalCfg.config });
+    for (const [flag, value] of Object.entries(effective.flags)) {
+      if (opts[flag] === undefined) opts[flag] = value;
+    }
+    for (const key of ['agent', 'runtime']) {
+      if (opts[key] === undefined && effective[key] !== undefined) opts[key] = effective[key];
+    }
+    console.log(`==> Defaults from ${globalCfg.file}`);
+  }
+
+  await createSandbox(name, workspace, opts);
+  if (project) {
+    console.log(`    ${PROJECT_CONFIG_NAME} found — applied (after approval) on first start.`);
+  }
   console.log(`    Start it:  vivary start ${name}`);
 }
 
