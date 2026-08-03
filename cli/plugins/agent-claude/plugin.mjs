@@ -3,7 +3,7 @@
 // project) and the import wizard (MCP servers, skills, settings, statusline).
 import fs from 'node:fs';
 import path from 'node:path';
-import { HOME, ask, readJson } from '../../core/util.mjs';
+import { HOME, ask, capture, readJson } from '../../core/util.mjs';
 
 const HOST_CLAUDE_DIR = path.join(HOME, '.claude');
 const HOST_CLAUDE_JSON = path.join(HOME, '.claude.json');
@@ -22,6 +22,31 @@ async function selectItems(kind, items) {
     else console.log(`  (ignoring invalid selection: ${tok})`);
   }
   return picked;
+}
+
+// Claude Code release channels (what claude.ai/install.sh itself reads). An
+// exact version is passed through untouched.
+const CLAUDE_RELEASES_URL = 'https://downloads.claude.ai/claude-code-releases';
+
+export function parseClaudeVersion(text) {
+  const v = String(text || '').trim();
+  return /^\d+\.\d+\.\d+/.test(v) ? v : null;
+}
+
+// Resolve the version to bake in. A failed probe is NOT fatal: fall back to the
+// channel name, which the installer resolves itself — the build then just loses
+// its cache-busting precision, so say so instead of failing the whole build.
+export function resolveClaudeVersion(channel = process.env.SANDBOX_CLAUDE_CHANNEL || 'latest',
+  fetchText = (url) => capture('curl', ['-fsSL', '--max-time', '10', url])) {
+  if (parseClaudeVersion(channel)) return channel; // already an exact version
+  const r = fetchText(`${CLAUDE_RELEASES_URL}/${channel}`);
+  const version = r.status === 0 ? parseClaudeVersion(r.stdout) : null;
+  if (!version) {
+    console.error(`WARNING: could not resolve the Claude Code '${channel}' version — `
+      + 'building with the channel name (a cached install layer may keep an older version)');
+    return channel;
+  }
+  return version;
 }
 
 // Rewrite host-specific bits for use inside the container: absolute paths
@@ -165,6 +190,15 @@ export default {
   order: 80,
   agents: { claude: { cmd: 'claude' } },
   launchers: { slaude: 'claude' },
+
+  // Pin the Claude Code version into the image build. Resolved here (not in
+  // core) because the release channel is this plugin's business; passing it as
+  // a build arg is what makes `vivary build` pick up a new release instead of
+  // reusing a cached install layer. SANDBOX_CLAUDE_CHANNEL takes 'latest'
+  // (default), 'stable', or an exact version.
+  buildArgs() {
+    return { CLAUDE_CODE_VERSION: resolveClaudeVersion() };
+  },
   macosProvision: ['npm install -g @anthropic-ai/claude-code'],
 
   runArgs({ cfg, dir }) {

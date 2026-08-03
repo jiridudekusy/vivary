@@ -87,6 +87,21 @@ function buildMacosBase({ force = false } = {}) {
   console.log(`==> macOS base '${MACOS_BASE}' ready — tart sandboxes clone it on first start.`);
 }
 
+// Build args contributed by plugins (`buildArgs(): {K: V}`). A plugin uses this
+// to pin what it installs from the network — an unpinned `curl | bash` or
+// `npm install -g` sits in a cached layer and silently keeps an old version
+// forever, while a value that changes with each release busts exactly that
+// layer and leaves the rest of the cache intact.
+export function collectBuildArgs(plugins = getPlugins()) {
+  const argv = [];
+  for (const p of plugins) {
+    for (const [key, value] of Object.entries(p.buildArgs?.() || {})) {
+      argv.push('--build-arg', `${key}=${value}`);
+    }
+  }
+  return argv;
+}
+
 export function cmdBuild(argv = []) {
   const { flags } = parseArgs(argv, { runtime: 'string', force: 'boolean' });
   if (flags.runtime === 'tart') return buildMacosBase({ force: flags.force });
@@ -94,6 +109,10 @@ export function cmdBuild(argv = []) {
   console.log(`==> Using runtime: ${runtime}`);
   const context = composeContext();
   console.log(`==> Composed image context: ${context} (${getPlugins().length} plugins)`);
+  const buildArgs = collectBuildArgs();
+  if (buildArgs.length) {
+    console.log(`==> Pinned versions: ${buildArgs.filter((a) => a !== '--build-arg').join(' ')}`);
+  }
 
   try {
     // Apple `container`'s builder VM has broken Node.js DNS (EAI_AGAIN), so
@@ -102,7 +121,7 @@ export function cmdBuild(argv = []) {
     // Force a native `container build` with SANDBOX_NATIVE_BUILD=1.
     if (runtime === 'container' && process.env.SANDBOX_NATIVE_BUILD !== '1' && hasCmd('docker')) {
       console.log(`==> Building ${IMAGE} with Docker, then loading into the container store`);
-      if (runInherit('docker', ['build', '-t', IMAGE, context]) !== 0) die('docker build failed');
+      if (runInherit('docker', ['build', ...buildArgs, '-t', IMAGE, context]) !== 0) die('docker build failed');
       const tar = path.join(os.tmpdir(), `${IMAGE}-${Date.now()}.tar`);
       try {
         if (runInherit('docker', ['save', `${IMAGE}:latest`, '-o', tar]) !== 0) die('docker save failed');
@@ -112,7 +131,7 @@ export function cmdBuild(argv = []) {
       }
     } else {
       console.log(`==> Building ${IMAGE}`);
-      if (runInherit(runtime, ['build', '-t', IMAGE, context]) !== 0) die(`${runtime} build failed`);
+      if (runInherit(runtime, ['build', ...buildArgs, '-t', IMAGE, context]) !== 0) die(`${runtime} build failed`);
     }
   } finally {
     fs.rmSync(context, { recursive: true, force: true });

@@ -18,6 +18,9 @@
 //   onPurge(name)                     — cleanup on rm --purge
 //   broker(req helpers) -> handled?   — HTTP routes on the host broker
 //   commands   { broker: fn(argv) }   — extra CLI subcommands
+//   buildArgs() -> {ARG: value}       — docker build args (pin network installs
+//                                       so a cached layer can't keep an old
+//                                       version; see agent-claude)
 //
 // Container-side parts live next to plugin.mjs:
 //   image.dockerfile   fragment appended to the composed Dockerfile
