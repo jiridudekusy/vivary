@@ -12,9 +12,9 @@ export const SANDBOXES_DIR = process.env.SANDBOXES_DIR || path.join(HOME, '.viva
 const LEGACY_SANDBOXES_DIR = path.join(HOME, 'claude-sandboxes');
 
 // One-time ~/claude-sandboxes -> ~/.vivary migration. Everything inside
-// (.broker, .ashp, per-sandbox dirs) moves with the rename; managed
-// ~/.ssh/config blocks reference identity files under the old path, so they
-// are rewritten in place (only inside vivary/sbx/sandbox.sh marker blocks).
+// (.broker, .ashp, per-sandbox dirs, ssh/config) moves with the rename; the
+// managed ssh config still points at the old path (the `Include` directive and
+// the Host blocks' identity files), so it is rewritten in place.
 // Running containers keep their old mounts until restarted — the notice says
 // so. Skipped when SANDBOXES_DIR is overridden via env.
 export function migrateLegacyHome() {
@@ -32,28 +32,46 @@ export function migrateLegacyHome() {
     '(vivary down/up; vivary egress stop for the egress proxy; broker restarts itself).');
 }
 
-// Rewrite legacy identity-file paths inside marker-delimited ~/.ssh/config
-// blocks (the ssh plugin owns the block format; markers match its writers).
+// Rewrite legacy paths inside the ssh config vivary manages: the whole managed
+// include file (<SANDBOXES_DIR>/ssh/config — moved by the rename above), plus
+// marker-delimited blocks in ~/.ssh/config itself (pre-include installs and the
+// `Include` directive block). The ssh plugin owns the block format; the markers
+// here match its writers.
 function rewriteSshConfigPaths() {
   const cfgFile = path.join(HOME, '.ssh/config');
-  if (!fs.existsSync(cfgFile)) return;
-  const lines = fs.readFileSync(cfgFile, 'utf8').split('\n');
-  let inBlock = false;
-  let changed = false;
-  const out = lines.map((line) => {
-    if (/^# >>> claude-sandbox:/.test(line)) inBlock = true;
-    const isEnd = /^# <<< claude-sandbox:/.test(line);
-    let next = line;
-    if (inBlock && line.includes(LEGACY_SANDBOXES_DIR)) {
-      next = line.split(LEGACY_SANDBOXES_DIR).join(SANDBOXES_DIR);
-      changed = true;
+  const incFile = path.join(SANDBOXES_DIR, 'ssh/config');
+  const rewritten = [];
+  // The include file is entirely ours — rewrite it wholesale.
+  if (fs.existsSync(incFile)) {
+    const content = fs.readFileSync(incFile, 'utf8');
+    const next = content.split(LEGACY_SANDBOXES_DIR).join(SANDBOXES_DIR);
+    if (next !== content) {
+      fs.writeFileSync(incFile, next);
+      rewritten.push(incFile.replace(HOME, '~'));
     }
-    if (isEnd) inBlock = false;
-    return next;
-  });
-  if (changed) {
-    fs.writeFileSync(cfgFile, out.join('\n'));
-    console.log('==> Rewrote sandbox identity paths in ~/.ssh/config managed blocks');
+  }
+  if (fs.existsSync(cfgFile)) {
+    const lines = fs.readFileSync(cfgFile, 'utf8').split('\n');
+    let inBlock = false;
+    let changed = false;
+    const out = lines.map((line) => {
+      if (/^# >>> (claude-sandbox:|vivary ssh include)/.test(line)) inBlock = true;
+      const isEnd = /^# <<< (claude-sandbox:|vivary ssh include)/.test(line);
+      let next = line;
+      if (inBlock && line.includes(LEGACY_SANDBOXES_DIR)) {
+        next = line.split(LEGACY_SANDBOXES_DIR).join(SANDBOXES_DIR);
+        changed = true;
+      }
+      if (isEnd) inBlock = false;
+      return next;
+    });
+    if (changed) {
+      fs.writeFileSync(cfgFile, out.join('\n'));
+      rewritten.push('~/.ssh/config');
+    }
+  }
+  if (rewritten.length) {
+    console.log(`==> Rewrote sandbox paths in managed ssh config: ${rewritten.join(', ')}`);
   }
 }
 export const IMAGE = process.env.SANDBOX_IMAGE || 'agent-sandbox-agents';

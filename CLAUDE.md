@@ -53,6 +53,15 @@ English, converse with the user in Czech.
   repeatable and may carry a `short` alias, and `list: true` on another type
   lets that flag also take an array in `.vivary.json`.
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
+  ssh_config: per-sandbox Host blocks live in `~/.vivary/ssh/config` (marker
+  blocks, `SANDBOXES_DIR`-relative), pulled in by ONE prepended managed
+  `Include` in `~/.ssh/config`; pre-include in-place blocks are migrated on the
+  next `up`, and the new `onRemove(name)` plugin hook (every `rm`, runs AFTER
+  `onPurge` which still needs the block's HostName) drops them again. First
+  touch of `~/.ssh/config` backs it up to `~/.ssh/config.vivary.bak` (once).
+  known_hosts removal is ATTRIBUTED via the block (HostName+Port ->
+  `knownHostsTarget`), which is the only way to spot docker's
+  `[localhost]:<sshPort>` line; unattributable leftovers stay.
   ssh publish (docker only — Apple has per-container DNS): per-sandbox port via
   core `assignStablePort` (sandbox.json `sshPort`/`tsSshPort`, prefers 2222 when
   free, probes the host, avoids other sandboxes' ports) — a FIXED 2222 made the
@@ -175,7 +184,8 @@ English, converse with the user in Czech.
   container→host connections (SYN is ACKed by the egress proxy, data dies —
   even closed ports look "open"). User must allow prompts.
 - User's ~/.ssh/config has GLOBAL `UserKnownHostsFile /dev/null` — ssh_config
-  first-match-wins, so vivary PREPENDS its managed Host blocks.
+  first-match-wins, so vivary PREPENDS its managed `Include` directive (and
+  before the include refactor, the Host blocks themselves).
 - pbcopy/pbpaste transcode via process locale → broker forces
   LC_ALL=en_US.UTF-8 for them (mojibake fix).
 - Claude Code reads Ctrl+V images via `xclip -t TARGETS -o` then

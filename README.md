@@ -273,14 +273,24 @@ the config alias `claude-sandbox-<name>` as the host.
 - Per-sandbox ed25519 keypair; public key = container's `authorized_keys`.
 - SSH **host keys persist** across rebuilds (no known_hosts churn); `up`
   pre-registers them in `~/.ssh/known_hosts` and maintains a marker-delimited
-  `Host` block in `~/.ssh/config`. The block is **prepended** — in ssh_config
+  `Host` block per sandbox in `~/.vivary/ssh/config`. Your `~/.ssh/config` only
+  gets a single managed `Include` of that file, **prepended** — in ssh_config
   the first obtained value wins, and a global `UserKnownHostsFile /dev/null`
-  later in the file would break Desktop's host verification.
+  later in the file would break Desktop's host verification. `vivary rm` drops
+  the sandbox's block again (any `rm`, not just `--purge`); a later `up` writes
+  it back. Blocks an older vivary wrote straight into `~/.ssh/config` are moved
+  into the include file on the next `up`, and the pre-vivary `~/.ssh/config` is
+  kept once as `~/.ssh/config.vivary.bak`.
+- `known_hosts` cleanup on `--purge` only removes what vivary provably wrote for
+  that sandbox: the exact `HostName`/`Port` target recorded in its Host block
+  (this is what catches docker's `[localhost]:<sshPort>` and a tart guest's IP)
+  plus container-DNS names derived from the sandbox name. Unattributable
+  leftovers are never touched.
 - Apple `container`: direct connection to `claude-sandbox-<name>.<dns-domain>:22`
   (no published ports, no conflicts). Docker publishes sshd on a **per-sandbox
   port** (`127.0.0.1:2222` for the first sandbox, then a stable name-derived one
   — several docker sandboxes can run at once), overridable with `SSH_PORT=`.
-  The port is persisted in `sandbox.json` and written into the `~/.ssh/config`
+  The port is persisted in `sandbox.json` and written into the managed ssh
   alias, so `ssh claude-sandbox-<name>` and `vivary ide` keep working. It binds
   loopback only; `--tailscale` publishes on all interfaces so other tailnet
   devices can reach it.

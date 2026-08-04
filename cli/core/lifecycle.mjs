@@ -332,6 +332,11 @@ export async function cmdRm(argv) {
   } else {
     console.log(`    Sandbox state kept in ${sandboxDir(name)} (use 'vivary rm ${name} --purge' to delete).`);
   }
+  // Host-side pointers at the (now gone) instance — ssh_config alias etc. Runs
+  // on EVERY rm, and after onPurge, which may still need to read them.
+  for (const p of getPlugins()) {
+    if (p.onRemove) await p.onRemove(name);
+  }
 }
 
 export async function cmdCreate(argv) {

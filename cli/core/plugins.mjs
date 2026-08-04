@@ -15,7 +15,9 @@
 //   upArgs(ctx) -> [args]             — extra args for `up` (detached mode)
 //   postUp(ctx, net) / preUp(ctx)     — up lifecycle (ssh registration etc.)
 //   onCreate(ctx, {interactive})      — sandbox creation (import wizards)
-//   onPurge(name)                     — cleanup on rm --purge
+//   onRemove(name)                    — cleanup on every rm (host-side pointers
+//                                       at the instance, e.g. the ssh alias)
+//   onPurge(name)                     — cleanup on rm --purge (runs first)
 //   broker(req helpers) -> handled?   — HTTP routes on the host broker
 //   commands   { broker: fn(argv) }   — extra CLI subcommands
 //   buildArgs() -> {ARG: value}       — docker build args (pin network installs
