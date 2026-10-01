@@ -137,6 +137,19 @@ export function sanitizeName(s) {
 // single-dash alias (`-p` for --publish, docker-style). Type 'list' is
 // repeatable: every occurrence appends, and a value may itself be a
 // comma-separated list, so the flag always normalizes to an array.
+// Current version of an npm package, for pinning a network install into a
+// build arg. An unpinned `npm install -g foo` lives in a cached layer and
+// silently keeps whatever version was current when that layer was first
+// built — see agent-claude for the same problem with its installer script.
+// A failed probe is NOT fatal: fall back to null so the caller can build
+// unpinned and say so, rather than failing the whole build offline.
+export function resolveNpmVersion(pkg, run = capture) {
+  const r = run('npm', ['view', pkg, 'version']);
+  if (r.status !== 0) return null;
+  const v = String(r.stdout || '').trim().split('\n').pop().trim();
+  return /^\d+\.\d+\.\d+/.test(v) ? v : null;
+}
+
 export function parseArgs(argv, spec, { unknownToRest = false } = {}) {
   const typeOf = (key) => (typeof spec[key] === 'string' ? spec[key] : spec[key]?.type);
   const shortFor = {};

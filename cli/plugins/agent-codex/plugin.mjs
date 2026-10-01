@@ -1,9 +1,19 @@
+import { resolveNpmVersion } from '../../core/util.mjs';
 // agent-codex: OpenAI Codex CLI inside the sandbox — `sodex` launcher and
 // auth/state persistence (~/.codex).
 import fs from 'node:fs';
 import path from 'node:path';
 
 export default {
+  buildArgs() {
+    const v = resolveNpmVersion('@openai/codex');
+    if (!v) {
+      console.error('WARNING: could not resolve the @openai/codex version — '
+        + 'building unpinned (a cached layer may keep an older codex)');
+    }
+    return { CODEX_VERSION: v || 'latest' };
+  },
+
   name: 'agent-codex',
   order: 85,
   agents: { codex: { cmd: 'codex' } },
