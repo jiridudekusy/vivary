@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>net.vivary.pf-parity</string>
+
+  <!-- Root: it loads a pf anchor. This is the ONLY reason vivary needs host
+       privileges, and installing this daemon is what stops it needing sudo
+       interactively on every `up`. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jdk/work/incubator/agent-sandbox/apple-container-sandbox/scripts/vivary-pf-parity.sh</string>
+  </array>
+
+  <!-- At boot: survives a host restart with no manual step. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- On every network change: utunN is renumbered when a VPN reconnects, so
+       the rule has to be regenerated. This is the mechanism that makes
+       requirement 3 hold by itself rather than by the user remembering. -->
+  <key>LaunchEvents</key>
+  <dict>
+    <key>com.apple.notifyd.matching</key>
+    <dict>
+      <key>network-change</key>
+      <dict>
+        <key>Notification</key>
+        <string>com.apple.system.config.network_change</string>
+      </dict>
+    </dict>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/vivary-pf-parity.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/vivary-pf-parity.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

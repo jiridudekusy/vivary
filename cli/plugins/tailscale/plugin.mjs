@@ -16,13 +16,13 @@ import path from 'node:path';
 import { capture, hasCmd } from '../../core/util.mjs';
 import { assignStablePort } from '../../core/sandbox.mjs';
 
-function tailscaleBin() {
+export function tailscaleBin() {
   if (hasCmd('tailscale')) return 'tailscale';
   const app = '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
   return fs.existsSync(app) ? app : null;
 }
 
-function tailscaleStatus() {
+export function tailscaleStatus() {
   const bin = tailscaleBin();
   if (!bin) return null;
   const r = capture(bin, ['status', '--json']);
