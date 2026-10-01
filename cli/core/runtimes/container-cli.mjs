@@ -2,7 +2,7 @@
 // function so it can be regression-tested against the legacy layout.
 
 import { capture, runInherit } from '../util.mjs';
-import { containerName, runningSet } from '../runtime.mjs';
+import { allSet, containerName, runningSet } from '../runtime.mjs';
 
 export function renderRunArgs(spec, { runtime }) {
   const argv = ['run'];
@@ -56,6 +56,13 @@ export function makeContainerCliRuntime(name) {
       return runInherit(name, renderExecArgs(cname, argv, opts));
     },
     stop(cname) { return capture(name, ['stop', cname]); },
+    // Restart a stopped container. The runtime re-runs the image ENTRYPOINT, so
+    // every entrypoint.d hook re-applies (sshd, dockerd + the cgroup prep, the
+    // uunpm shim) — verified on Apple `container` 1.1.0. What does NOT come
+    // back is anything baked into the container config at creation (-e env,
+    // mounts, caps): that is why the lifecycle diffs the config snapshot first.
+    start(cname) { return capture(name, ['start', cname]); },
+    exists(sandboxName) { return allSet(name).has(containerName(sandboxName)); },
     rm(cname) { return capture(name, ['rm', cname]); },
     isRunning(sandboxName) { return runningSet(name).has(containerName(sandboxName)); },
     runningSet() { return runningSet(name); },

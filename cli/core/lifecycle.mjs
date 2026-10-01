@@ -6,7 +6,8 @@ import { termEnvArgs, termEnvVars } from './runtime.mjs';
 import { resolveRuntime, runtimeKind, runtimesRunning } from './runtimes/index.mjs';
 import { buildRunSpec } from './runtimes/spec.mjs';
 import {
-  applyStickyFlags, createSandbox, ensureSandbox, listSandboxNames, loadSandbox,
+  applyStickyFlags, containerConfigSnapshot, createSandbox, diffContainerConfig,
+  ensureSandbox, formatConfigChanges, listSandboxNames, loadSandbox,
   overlayConfigFlags, resolveName, sandboxDir, saveSandbox,
 } from './sandbox.mjs';
 import { agentRegistry, getPlugins, pluginFlagDefs, pluginFlagSpec } from './plugins.mjs';
@@ -19,10 +20,35 @@ import { brokerEnvArgs, brokerEnvVars } from './broker.mjs';
 const CORE_FLAGS = {
   name: 'string', workspace: 'string', agent: 'string', runtime: 'string',
   memory: 'string', cpus: 'string',
+  // Containers PERSIST by default: whatever the agent installed inside (apt
+  // packages, kind, kubectl, docker images on Apple `container`) survives a
+  // down/up instead of being thrown away with --rm. --ephemeral restores the
+  // old throwaway behaviour; --recreate rebuilds a kept container once.
+  ephemeral: 'optional', recreate: 'boolean',
 };
 
 function flagSpec() {
   return { ...CORE_FLAGS, ...pluginFlagSpec() };
+}
+
+// Precedence for the scalars buildRunSpec/cmdStart read:
+//   CLI > project .vivary.json > sticky sandbox.json > global defaults > built-in
+//
+// The sticky tier sits ABOVE the global defaults, unlike plugin flags where the
+// file always wins. `~/.vivary/vivary.json` is a fallback for sandboxes that
+// said nothing; it has no business resizing one that was explicitly given
+// `--memory 20g`. A project .vivary.json still wins — committed, deliberate,
+// per-project intent. `agent` skips the sticky tier: it is resolved from
+// sandbox.json by cmdStart already.
+export function resolveScalars(cliFlags = {}, projectConfig, cfg = {}, effective = {}) {
+  const flags = { ...cliFlags };
+  for (const key of ['agent', 'memory', 'cpus']) {
+    if (flags[key] !== undefined) continue;
+    if (projectConfig?.[key] !== undefined) flags[key] = projectConfig[key];
+    else if (key !== 'agent' && cfg[key] !== undefined) flags[key] = cfg[key];
+    else if (effective[key] !== undefined) flags[key] = effective[key];
+  }
+  return flags;
 }
 
 function makeCtx(cfg, flags, mode, rt) {
@@ -124,12 +150,40 @@ async function prepare(argv, opts = {}) {
     value: effective.egress, enumerable: false, configurable: true,
   });
 
-  // Backfill file-provided scalars where no CLI flag was given (buildRunSpec
-  // reads memory/cpus from flags; cmdStart reads the agent).
-  const flags = { ...cliFlags };
-  for (const key of ['agent', 'memory', 'cpus']) {
-    if (flags[key] === undefined && effective[key] !== undefined) flags[key] = effective[key];
+  // --ephemeral is a CORE flag, so applyStickyFlags (which walks plugin flags)
+  // does not see it — persist it here. Accepts off/0 so it can be turned back.
+  if (cliFlags.ephemeral !== undefined) {
+    const v = cliFlags.ephemeral;
+    const next = !(v === 'off' || v === '0' || v === false);
+    if (cfg.ephemeral !== next) {
+      cfg.ephemeral = next;
+      saveSandbox(cfg);
+    }
   }
+
+  // memory/cpus are STICKY, like the plugin flags. They size the machine, so
+  // `--memory 20g` once must keep meaning 20g: without this the next flagless
+  // `up` silently fell back to the 4g default — and, since the persistent
+  // container's config snapshot records the size, that showed up as `up`
+  // REFUSING to start ("memory: 20g -> 4g") rather than as a quiet downgrade.
+  // applyStickyFlags only walks plugin flags, so these are persisted here.
+  for (const key of ['memory', 'cpus']) {
+    if (cliFlags[key] !== undefined && cfg[key] !== cliFlags[key]) {
+      cfg[key] = cliFlags[key];
+      saveSandbox(cfg);
+    }
+  }
+
+  // Backfill scalars where no CLI flag was given (buildRunSpec reads
+  // memory/cpus from flags; cmdStart reads the agent).
+  //
+  // For memory/cpus the sticky value outranks the GLOBAL default, unlike plugin
+  // flags where the file always wins. `~/.vivary/vivary.json` is a fallback for
+  // sandboxes that said nothing — it has no business resizing a sandbox that
+  // was explicitly given `--memory 20g`. A PROJECT .vivary.json still wins:
+  // that is committed, deliberate, per-project intent.
+  // Net order: CLI > project file > sticky sandbox.json > global > built-in.
+  const flags = resolveScalars(cliFlags, project?.config, cfg, effective);
   return { cfg, flags, rest };
 }
 
@@ -154,6 +208,23 @@ export async function cmdStart(argv, forcedAgent) {
     }));
   }
   console.log(`==> Runtime: ${cfg.runtime} | agent: ${agentName} | workspace: ${cfg.workspace}`);
+  // Persistent (default): the container is always `sleep infinity` and the agent
+  // runs via exec, so one container shape serves up/start/shell. Interactive
+  // commands put it back to sleep on exit — an `up` sandbox is left running,
+  // because `up` is the explicit "keep it running" request.
+  if (!vm && !cfg.ephemeral) {
+    const { started } = await ensureUpContainer(ctx, rt, { recreate: !!flags.recreate });
+    const code = rt.exec(ctx.cname, [agent.cmd, ...rest], {
+      interactive: IS_TTY,
+      env: { ...termEnvVars(), ...(await brokerEnvVars(cfg)) },
+      cwd: cfg.workspace,
+    });
+    if (started && !cfg.desiredRunning) {
+      rt.stop(ctx.cname);
+      console.log(`==> Sandbox '${cfg.name}' stopped (container kept — installed state preserved).`);
+    }
+    process.exit(code);
+  }
   const spec = await buildRunSpec(ctx, {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [agent.cmd, ...rest], termEnv: termEnvArgs(),
   });
@@ -179,6 +250,19 @@ export async function cmdShell(argv) {
   }
 
   console.log(`==> Runtime: ${cfg.runtime} | shell | workspace: ${cfg.workspace}`);
+  if (!vm && !cfg.ephemeral) {
+    const { started } = await ensureUpContainer(ctx, rt, { recreate: !!flags.recreate });
+    const code = rt.exec(ctx.cname, ['bash'], {
+      interactive: IS_TTY,
+      env: { ...termEnvVars(), ...(await brokerEnvVars(cfg)) },
+      cwd: cfg.workspace,
+    });
+    if (started && !cfg.desiredRunning) {
+      rt.stop(ctx.cname);
+      console.log(`==> Sandbox '${cfg.name}' stopped (container kept — installed state preserved).`);
+    }
+    process.exit(code);
+  }
   const spec = await buildRunSpec(ctx, {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [vm ? 'zsh' : 'bash'], termEnv: termEnvArgs(),
   });
@@ -188,24 +272,92 @@ export async function cmdShell(argv) {
   process.exit(rt.run(spec));
 }
 
-export async function cmdUp(argv) {
-  const { cfg, flags } = await prepare(argv);
-  const rt = resolveRuntime(cfg.runtime);
-  const ctx = makeCtx(cfg, flags, 'up', rt);
-  if (rt.isRunning(cfg.name)) {
-    die(`'${ctx.cname}' is already running (stop it with: vivary down ${cfg.name})`);
+// Bring a PERSISTENT container into the running state, creating it only if it
+// is not there yet. Returns { started } — true when this call is what started
+// it, which is how `start`/`shell` know to put it back to sleep afterwards
+// (an `up` sandbox must keep running; see cmdUp).
+//
+// `spec` is built by the caller even on the restart path: buildRunSpec is where
+// plugins do their host-side prep as a side effect (egress ensures ASHP and
+// re-syncs the rules, npmrc re-derives its import, egress copies the CA), and
+// a restart needs all of that just as much as a fresh run. Only the rendered
+// argv is discarded.
+async function ensurePersistentContainer(rt, ctx, spec, { recreate = false } = {}) {
+  const { cfg, flags } = ctx;
+  const snapshot = containerConfigSnapshot(cfg, flags);
+
+  if (rt.exists(cfg.name)) {
+    if (recreate) {
+      console.log(`==> --recreate: discarding the kept container '${ctx.cname}'`);
+      rt.rm(ctx.cname);
+    } else {
+      const changes = diffContainerConfig(cfg.containerConfig, snapshot);
+      if (changes.length) {
+        die(`sandbox '${cfg.name}' has a kept container built with different settings:\n`
+          + `${formatConfigChanges(changes)}\n`
+          + '    A container bakes its env, mounts and caps at creation, so restarting it\n'
+          + '    would silently ignore these. Rebuild it with:\n'
+          + `      vivary ${ctx.mode} --recreate\n`
+          + '    (anything installed INSIDE the container is lost; sandbox state in\n'
+          + `     ${sandboxDir(cfg.name)} and the workspace are untouched)`);
+      }
+      const r = rt.start(ctx.cname);
+      if (r.status !== 0) die(`failed to start kept container: ${r.stderr || r.stdout}`);
+      console.log(`==> Restarted kept container '${ctx.cname}' (installed state preserved)`);
+      return { started: true };
+    }
   }
 
+  const r = rt.run(spec, { detached: true });
+  if (r.status !== 0) die(`${cfg.runtime} run failed: ${r.stderr || r.stdout}`);
+  cfg.containerConfig = snapshot;
+  saveSandbox(cfg);
+  return { started: true };
+}
+
+// `up` leaves a container running for something to attach to LATER — that is
+// what separates it from `start`/`shell`, which bring their own session. With
+// neither sshd nor a tailnet publish there is nothing to attach with, so the
+// sandbox would sit there burning RAM and be reachable only by going back to
+// the very Mac that started it. Refuse instead of leaving that to be discovered
+// from an iPad.
+//
+// `ssh` is read through the ssh plugin so a sandbox created before ssh became a
+// flag still counts as one (it infers from the existing keypair).
+export function requireReachable(cfg, plugins = getPlugins()) {
+  if (cfg.tailscale || cfg.ssh) return;
+  // Any plugin may provide a way in — ssh infers one from a pre-flag keypair,
+  // paseo is one in its own right. Asking all of them beats special-casing one.
+  if (plugins.some((p) => p.inferReachable?.(cfg))) return;
+  die(`'${cfg.name}' would have no way in: \`up\` runs a container for something to\n`
+    + '    attach to later, and neither sshd nor a tailnet publish is enabled.\n'
+    + '    Pick at least one (both are sticky, so this is a one-off):\n'
+    + `      vivary up --ssh              # ssh / IDE / Claude Desktop from this Mac\n`
+    + `      vivary up --tailscale        # also reachable from your iPad, phone, ...\n`
+    + `      vivary up --paseo            # drive its agents from the Paseo app\n`
+    + '    Or work in it directly without a long-running container: vivary shell');
+}
+
+// Create-or-restart the sandbox's long-lived container in the FULL `up` shape,
+// then run the postUp hooks.
+//
+// Every command that materialises a persistent container goes through here, and
+// that matters: the ssh plugin contributes SANDBOX_SSH, the ssh state mount and
+// the published port from `upArgs`, NOT `runArgs`. A container first created by
+// `start`/`shell` without upArgs therefore had no sshd at all — and since env is
+// baked at creation, a later `vivary up` just restarted it and SSH never came
+// on (tailnet ssh answered "Connection refused"). One shape for all commands is
+// what keeps that from happening again.
+async function ensureUpContainer(ctx, rt, { recreate = false } = {}) {
+  const { cfg } = ctx;
   const vm = runtimeKind(cfg.runtime) === 'vm-tart';
-  // vm-tart: no plugin hooks in Phase 2 (hooks assume a Linux container).
   if (!vm) {
     for (const p of getPlugins()) {
       if (p.preUp) await p.preUp(ctx);
     }
   }
-
   const spec = await buildRunSpec(ctx, {
-    rm: true, interactive: false, image: IMAGE, command: ['sleep', 'infinity'],
+    rm: !!cfg.ephemeral, interactive: false, image: IMAGE, command: ['sleep', 'infinity'],
   });
   spec.image = rt.ensureImage(spec);
   applyVmContribute(spec, await vmContribute(ctx));
@@ -218,20 +370,37 @@ export async function cmdUp(argv) {
     }
   }
 
-  const r = rt.run(spec, { detached: true });
-  if (r.status !== 0) die(`${cfg.runtime} run failed: ${r.stderr || r.stdout}`);
+  let started = true;
+  if (!vm && !cfg.ephemeral) {
+    ({ started } = await ensurePersistentContainer(rt, ctx, spec, { recreate }));
+  } else {
+    const r = rt.run(spec, { detached: true });
+    if (r.status !== 0) die(`${cfg.runtime} run failed: ${r.stderr || r.stdout}`);
+  }
+  for (const p of getPlugins()) {
+    if (!vm && p.postUp) await p.postUp(ctx);
+    if (vm && p.vmPostUp) await p.vmPostUp(ctx);
+  }
+  return { started };
+}
 
+export async function cmdUp(argv) {
+  const { cfg, flags } = await prepare(argv);
+  const rt = resolveRuntime(cfg.runtime);
+  const ctx = makeCtx(cfg, flags, 'up', rt);
+  if (rt.isRunning(cfg.name)) {
+    die(`'${ctx.cname}' is already running (stop it with: vivary down ${cfg.name})`);
+  }
+  requireReachable(cfg);
+
+  await ensureUpContainer(ctx, rt, { recreate: !!flags.recreate });
+  // `up` means "I want this running" — remembered so `vivary resume` can bring
+  // exactly these back after a host reboot, and cleared by `down`.
+  if (!cfg.desiredRunning) {
+    cfg.desiredRunning = true;
+    saveSandbox(cfg);
+  }
   console.log(`==> Sandbox '${cfg.name}' is up (runtime: ${cfg.runtime})`);
-  if (!vm) {
-    for (const p of getPlugins()) {
-      if (p.postUp) await p.postUp(ctx);
-    }
-  }
-  if (vm) {
-    for (const p of getPlugins()) {
-      if (p.vmPostUp) await p.vmPostUp(ctx);
-    }
-  }
   console.log(`    Stop with: vivary down ${cfg.name}`);
 }
 
@@ -241,6 +410,11 @@ export function cmdDown(argv) {
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
   // Stop it wherever it actually runs, not where sandbox.json says (a project
   // .vivary.json can override the runtime for a start — see runtimesRunning).
+  // Down is an explicit "stay off" — don't let `resume` bring it back.
+  if (cfg.desiredRunning) {
+    cfg.desiredRunning = false;
+    saveSandbox(cfg);
+  }
   const running = runtimesRunning(name);
   if (!running.length) {
     console.log(`Sandbox '${name}' is not running.`);
@@ -251,6 +425,57 @@ export function cmdDown(argv) {
     rt.stop(rt.instanceName(name));
     const where = rtName === cfg.runtime ? '' : ` (runtime: ${rtName}, sandbox.json says ${cfg.runtime})`;
     console.log(`==> Sandbox '${name}' stopped${where} (state and chats are preserved).`);
+  }
+}
+
+// `vivary resume` — bring back every sandbox that was up when the host went
+// down. A Mac reboot stops the runtime without any chance to record intent, so
+// the intent is recorded up front instead: `up` sets desiredRunning, `down`
+// clears it. Runs the ordinary up path per sandbox, so it works whether the
+// kept container survived or has to be created from scratch.
+export async function cmdResume(argv = []) {
+  const { flags } = parseArgs(argv, { 'dry-run': 'boolean' });
+  const wanted = listSandboxNames().sort()
+    .map((name) => loadSandbox(name))
+    .filter((cfg) => cfg && cfg.desiredRunning);
+
+  if (!wanted.length) {
+    console.log('No sandboxes are marked to run (vivary up marks one, vivary down clears it).');
+    return;
+  }
+
+  const todo = wanted.filter((cfg) => !runtimesRunning(cfg.name).length);
+  const already = wanted.length - todo.length;
+  if (already) console.log(`==> Already running: ${already}`);
+  if (!todo.length) {
+    console.log('==> Nothing to resume.');
+    return;
+  }
+  if (flags['dry-run']) {
+    console.log(`==> Would resume: ${todo.map((c) => c.name).join(', ')}`);
+    return;
+  }
+
+  const failed = [];
+  for (const cfg of todo) {
+    console.log(`\n==> Resuming '${cfg.name}' (${cfg.workspace})`);
+    try {
+      // Go through the normal up path from the sandbox's own workspace so the
+      // project .vivary.json and its approval gate apply exactly as usual.
+      await cmdUp(['--name', cfg.name]);
+    } catch (e) {
+      // One broken sandbox (deleted workspace, unapproved config) must not
+      // stop the rest — report at the end instead.
+      failed.push({ name: cfg.name, err: e?.message || String(e) });
+      console.error(`    FAILED: ${e?.message || e}`);
+    }
+  }
+  if (failed.length) {
+    console.error(`\n==> ${failed.length} of ${todo.length} failed to resume: `
+      + failed.map((f) => f.name).join(', '));
+    process.exitCode = 1;
+  } else {
+    console.log(`\n==> Resumed ${todo.length} sandbox(es).`);
   }
 }
 

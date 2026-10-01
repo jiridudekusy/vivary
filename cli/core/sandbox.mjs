@@ -62,7 +62,7 @@ export function listSandboxNames() {
 // sandbox.json keys holding a host port vivary published for a sandbox. Every
 // assignment checks all of them across all sandboxes, so two features (plain
 // sshd publish, tailnet-facing sshd publish) can never hand out the same port.
-const PORT_KEYS = ['sshPort', 'tsSshPort'];
+const PORT_KEYS = ['sshPort', 'tsSshPort', 'paseoPort', 'tsPaseoPort'];
 
 // Stable per-sandbox host port, persisted in sandbox.json so ~/.ssh/config and
 // known_hosts stay valid across restarts. `preferred` is taken when nothing
@@ -133,6 +133,52 @@ function sameStickyValue(a, b) {
 }
 
 // Apply sticky plugin flags to a sandbox config, persisting changes.
+// --- persistent containers: config snapshot -----------------------------------
+//
+// A persistent container bakes its -e env, mounts, caps and memory/cpus at
+// CREATION; restarting it re-runs the entrypoint (so hooks re-apply) but cannot
+// change any of that. So a later flag change would silently not take effect —
+// "I turned on --docker and it does nothing". We therefore snapshot the knobs
+// that shape the container and diff them on every restart.
+//
+// Deliberately snapshotting the FLAGS rather than the rendered run argv: the
+// argv carries volatile values (-it by TTY, TERM, the ASHP proxy IP, the broker
+// port) that would report changes on every run.
+export function containerConfigSnapshot(cfg, flags = {}, plugins = getPlugins()) {
+  const snap = {
+    memory: flags.memory || process.env.SANDBOX_MEMORY || '4g',
+    cpus: flags.cpus || process.env.SANDBOX_CPUS || '4',
+    runtime: cfg.runtime,
+    workspace: cfg.workspace,
+  };
+  for (const p of plugins) {
+    for (const [flag, def] of Object.entries(p.flags || {})) {
+      if (!def.sticky) continue;
+      const key = def.cfgKey || flag;
+      snap[key] = cfg[key] ?? false;
+    }
+  }
+  return snap;
+}
+
+// Changed keys between the snapshot a container was created with and the one
+// this invocation wants. Exported for tests.
+export function diffContainerConfig(saved, current) {
+  const changes = [];
+  if (!saved) return changes;   // created before snapshots existed — no claim
+  for (const key of [...new Set([...Object.keys(saved), ...Object.keys(current)])].sort()) {
+    const a = JSON.stringify(saved[key] ?? false);
+    const b = JSON.stringify(current[key] ?? false);
+    if (a !== b) changes.push({ key, from: saved[key] ?? false, to: current[key] ?? false });
+  }
+  return changes;
+}
+
+export function formatConfigChanges(changes) {
+  const show = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
+  return changes.map((c) => `      ${c.key}: ${show(c.from)} -> ${show(c.to)}`).join('\n');
+}
+
 export function applyStickyFlags(cfg, flags) {
   let changed = false;
   for (const p of getPlugins()) {
