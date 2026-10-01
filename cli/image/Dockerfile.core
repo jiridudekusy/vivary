@@ -75,6 +75,13 @@ RUN npm install -g playwright \
     && chown -R agent:agent /opt/pw-browsers
 
 # --- Core sandbox plumbing -------------------------------------------------------
+# tini: PID 1 must reap orphans left behind by entrypoint hooks (see
+# entrypoint.sh). Deliberately its own late layer — folding it into the apt
+# block above would bust every layer after it (Node, JDK, Gradle, the
+# Playwright Chromium download) on a one-line change.
+RUN apt-get update && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY rootfs/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY rootfs/fix-net.sh /usr/local/bin/fix-net
 COPY rootfs/profile.d-sandbox.sh /etc/profile.d/sandbox.sh
