@@ -13,7 +13,7 @@ import { loadPlugins, agentRegistry, pluginCommands, pluginHelp } from './core/p
 import { cmdBroker } from './core/broker.mjs';
 import { cmdBuild } from './core/build.mjs';
 import {
-  cmdCreate, cmdDown, cmdInit, cmdList, cmdRm, cmdShell, cmdStart, cmdUp,
+  cmdCreate, cmdDown, cmdInit, cmdList, cmdResume, cmdRm, cmdShell, cmdStart, cmdUp,
 } from './core/lifecycle.mjs';
 
 function help(launchers) {
@@ -35,16 +35,35 @@ Commands:
   init [name]          Write <workspace>/.vivary.json (committable project
                        config: agent, resources, flags, egress policy) from
                        the sandbox's current config and mark it approved.
-  up [name]            Long-running container with sshd — for Claude Desktop
-                       (Code tab -> "+ Add SSH connection"), IDEs, ssh.
-  down [name]          Stop the long-running container.
+  up [name]            Long-running container for something to attach to later.
+                       Needs --ssh and/or --tailscale — with neither there is
+                       no way in but 'vivary shell' on this Mac, so it refuses.
+                       --ssh: Claude Desktop (Code tab -> "+ Add SSH
+                       connection"), IDEs, plain ssh.
+  down [name]          Stop the container (kept, so anything installed inside
+                       survives; 'rm' is what deletes it).
+  resume [--dry-run]   Start every sandbox that was up before the host went
+                       down (i.e. every one 'up' marked and 'down' did not
+                       clear) — run it after a reboot.
+  paseo [name]         Show the Paseo URL and password for a sandbox — what you
+                       type into the app on a phone or tablet.
+  key add <dev> --file <p.pub> | --key "<ssh-...>"
+  key ls | key rm <dev>
+                       Device SSH keys: register a device's PUBLIC key once and
+                       it authorizes EVERY sandbox, present and future — so an
+                       iPad/phone needs ONE key instead of one per container.
+                       Applied to running sandboxes immediately (no restart).
   ide [name]           Open Cursor/VS Code into the sandbox via Remote-SSH
                        (implies 'up' when needed; --editor <bin> to force).
   ls | list            List sandboxes across runtimes.
   shell [name]         Bash in the sandbox (attaches if running, otherwise
                        starts a container; auto-creates like start).
   rm [name] [--purge]  Remove the container (--purge also deletes state).
-  build                Build the container image (core + all plugins).
+  build [--pull]       Build the container image (core + all plugins).
+                       --pull re-resolves the ubuntu base, so apt/Node/JDK
+                       layers refresh too; --no-cache rebuilds everything
+                       (slow). Without either, only version-pinned layers
+                       (Claude Code, uu-safe-*) pick up new releases.
                        --runtime tart [--force]: build the macOS base VM
                        (vivary-macos-base) that tart sandboxes clone.
   broker [stop]        Run/stop the host broker (usually automatic).
@@ -59,6 +78,14 @@ Core options (start/create/up/shell):
   --agent <a>          Default agent for the sandbox
   --memory <m>         Container memory (default: $SANDBOX_MEMORY or 4g)
   --cpus <n>           Container CPUs (default: $SANDBOX_CPUS or 4)
+  --ephemeral[=off]    Throw the container away on exit (the pre-persistence
+                       behaviour). Sticky. By default containers are KEPT, so
+                       apt/npm installs, kind, kubectl and docker images inside
+                       survive down/up; only the sandbox state mounts used to.
+  --recreate           Rebuild a kept container from the image once. Needed
+                       after changing flags that are baked in at creation
+                       (env, mounts, caps, memory) — vivary refuses to restart
+                       a container whose settings no longer match and says so.
 
 Plugin options:
 ${pluginHelp()}
@@ -114,6 +141,9 @@ async function main() {
       break;
     case 'up':
       await cmdUp(rest);
+      break;
+    case 'resume':
+      await cmdResume(rest);
       break;
     case 'down':
       cmdDown(rest);
