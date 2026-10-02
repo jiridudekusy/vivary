@@ -176,7 +176,7 @@ cleanly revertible. Use a host-side forwarder (`socat TCP-LISTEN:<port>,
 bind=192.168.64.1,fork TCP:<target>:<port>`) instead: the host opens the
 connection, so it takes the tunnel, and killing the process ends the access.
 
-## Installed 2026-10-02 — and DNS turns out to be a second, separate gap
+## Installed 2026-10-02
 
 The anchor was already registered in `/etc/pf.conf` from the manual fix, so
 steps 1-3 (the destructive ones) did not repeat. Installing the LaunchDaemon
@@ -204,87 +204,68 @@ Result in sandbox `smarta`, VPN on `utun9`, no restart needed:
 `https://10.145.33.38/` answers `HTTP 400` from `peer 10.145.33.38` — the
 server itself.
 
-### The spec was wrong about DNS
+### Survives reboot and renumbering — measured, not assumed
 
-"DNS still works — the query goes to the vmnet gateway, which the host resolver
-answers" holds only for PUBLIC names. A VPN pushes split-DNS zones, and those
-the gateway cannot answer at all:
+The host was rebooted later the same day. The VPN came back as `utun5`
+(previously `utun9`) and Tailscale as `utun4`. Daemon log:
 
-    host resolvers (scutil --dns)
-      #11  pseex20-smarta.local -> 10.145.32.1
-      #12  pseex21.local        -> 10.145.8.1
-      #13  cams                 -> 10.44.10.1
+    12:01:14 SKIP: no sandbox bridge found (container runtime not up?)
+    ...
+    12:01:55 loaded 1 rule(s) for 192.168.64.0/24: utun5
 
-Measured from the sandbox AFTER routing was fixed:
+It waited for the container runtime, then picked the new interface up by
+itself; `smarta` reached `10.145.33.38:443` with no manual step. That covers the
+reconnect, reboot and renumber acceptance criteria.
 
-| query path | result |
-|---|---|
-| `smarta-perf.pseex20-smarta.local` @ 10.145.32.1 (VPN NS) | 10.145.33.38 |
-| same name @ 192.168.64.1 (vmnet gateway) | **ETIMEOUT** |
+### DNS: the original position holds
 
-So routing parity does not give name parity: with only the gateway resolver a
-sandbox reaches VPN hosts by IP and nothing by name. Note the VPN nameservers
-are themselves inside the tunnel (10.145.32.1 is in `10.145.32/22`), so the
-sandbox could not have queried them before the NAT rule existed — the two gaps
-had to be fixed in this order.
+The vmnet gateway relays the HOST's system resolver, `/etc/resolver/*` split
+zones included — so when the host resolves a VPN name, a sandbox does too.
+Measured after the reboot, stock `/etc/resolv.conf` (gateway only, no
+workaround):
 
-Workaround in place on `smarta`, NOT persistent (the runtime regenerates
-`/etc/resolv.conf` at boot):
+    $ getent hosts smarta-perf.pseex20-smarta.local      # inside smarta
+    10.145.33.38    smarta-perf.pseex20-smarta.local
+
+No in-sandbox forwarder is needed for parity. Do not build one: it would only
+make a sandbox resolve names the host itself cannot, which is a different
+feature from parity.
+
+### What misled the first diagnosis: a host resolver broken for one boot
+
+Before that reboot, the HOST could not resolve the `.local` VPN zones at all —
+`curl` on the Mac failed with "Could not resolve host", and the sandbox,
+faithfully relaying it, got ETIMEOUT from the gateway. That looked like a
+sandbox gap and was first written up as one ("forwarding to the host resolver
+would be worse"). It was parity: host and sandbox failed the same way.
+
+The zone files never changed (`/etc/resolver/pseex20-smarta.local` →
+`10.145.32.1`, from April). `cams`, the one zone without a `.local` suffix,
+kept working throughout (0.9 s vs 10 s for the `.local` zones), so it was
+specific to how mDNSResponder handles `.local`. Its log shows the two states:
+
+    VPN not connected:   [R1066->mDNS] ... rdata: <none>  duration: 5s
+    VPN connected:       [R1356] starting parallel unicast query ...
+                         Question assigned DNS service 2 ... duration: 0s
+
+i.e. for a `.local` name it adds the unicast query only when it believes the
+zone's server is reachable. In the broken boot it never did, even though
+`scutil --dns` reported the resolver as Reachable. `killall -HUP mDNSResponder`
+did not fix it; a reboot did. Root cause NOT established — plausibly an
+ordering effect at boot (mDNSResponder starts before the VPN exists), but that
+is a hypothesis.
+
+Ruled out: Tunnelblick (`SMARTA SDBuseDNS = 0`, it never sets DNS — the zone
+files are the only mechanism), and any install at that restart (none of
+macOS, Tailscale or Tunnelblick changed).
+
+If it recurs: test the host first (`curl` a VPN name ON THE MAC). If the host
+fails too, it is this, not vivary. Reboot fixed it; for a single sandbox the
+stopgap is a direct nameserver in its `/etc/resolv.conf`:
 
     nameserver 192.168.64.1
     nameserver 10.145.32.1
     options no-aaaa timeout:1 attempts:1
 
-`timeout:1` matters — the default 5 s per attempt is what makes a fallback
-resolver feel broken. Public names still answer from the gateway at full speed;
-VPN names cost one timeout (~1 s) before the second resolver answers.
-
-Limits of that shape, and why it is a workaround rather than the fix:
-
-- glibc honours at most 3 `nameserver` lines (MAXNS), and this host already has
-  three VPN zones plus the gateway. It does not scale to all of them.
-- Every name the gateway fails to answer is then asked at the corporate
-  resolver, so public lookups that miss leak outward.
-- Per-domain forwarding is what is actually wanted (`server=/zone/ip`), which
-  needs a resolver in the image — there is no dnsmasq, resolvectl or
-  systemd-resolved in it today.
-
-### Forwarding to the host resolver would be WORSE, not better
-
-The obvious shape — point the sandbox at the host and let the host's own
-resolvers do the work — fails, because the host cannot resolve these names
-either. The VPN hands out `.local` zones, and macOS reserves `.local` for
-Bonjour: mDNSResponder answers them from multicast and never consults the
-scoped unicast resolver, even though it is configured and reachable.
-
-    $ scutil --dns
-      resolver #4   domain: local               options: mdns   reach: Not Reachable
-      resolver #11  domain: pseex20-smarta.local  nameserver[0]: 10.145.32.1  reach: Reachable
-
-    $ dig +short @10.145.32.1 smarta-perf.pseex20-smarta.local
-    10.145.33.38                      # the zone's own server knows it
-
-    $ dns-sd -Q smarta-perf.pseex20-smarta.local A
-    ... Add  2  0  smarta-perf.pseex20-smarta.local. Addr IN 0.0.0.0 No Such Record
-
-    $ curl https://smarta-perf.pseex20-smarta.local/
-    curl: (6) Could not resolve host        # on the HOST
-
-More specific zone, reachable server, right answer available — and
-mDNSResponder still says No Such Record. The ETIMEOUT at the vmnet gateway is
-therefore not a container bug: the gateway is faithfully relaying a host
-resolver that cannot answer.
-
-(The 2026-09-29 table above recorded the host resolving this name. It does not
-today. Something moved on the host or in the VPN profile since; the current
-measurement is the one to trust.)
-
-So a Linux sandbox asking `10.145.32.1` directly is now BETTER at VPN names
-than the Mac it runs on — no mDNS layer to intercept `.local`.
-
-Proper fix, not built: read the host's split-DNS zone MAP from `scutil --dns`
-at `up` time (domain -> nameserver, which is configuration and is correct),
-pass it in, and have a hook configure per-domain forwarding. Parity with what
-the host is CONFIGURED to reach, deliberately not with what the host's resolver
-actually answers — those differ here, and the configuration is the part worth
-copying. Same principle as the pf rule, and it belongs in the same place.
+(`timeout:1` keeps the fallback from costing 5 s per lookup; lost on container
+restart.)

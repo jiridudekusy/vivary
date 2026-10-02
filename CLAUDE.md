@@ -348,12 +348,24 @@ English, converse with the user in Czech.
   allow. Remaining: ASHP ignores rule agent_id (allow rules are global
   across sandboxes) and speaks only HTTP/1.1 upstream (h2-only backends
   like cursor's api5 and wss transports fail) — both need ASHP-side work.
-- Host network parity: a sandbox cannot reach what the host routes through a
-  VPN tunnel (vmnet NATs onto the primary interface only) — DNS resolves, TCP
-  dies, so it reads as a policy block. One host pf `nat on <utun>` rule fixes
-  it; needs dynamic interface discovery (utunN is renumbered on reconnect) and
-  host root. Should be DEFAULT, not a flag — egress is where access gets
-  limited. Spec: docs/superpowers/plans/2026-09-29-host-network-parity.md
+- Host network parity: DONE for routing (2026-10-02). vmnet NATs sandboxes onto
+  the primary interface only, so VPN (`utun`) destinations died while DNS still
+  answered — read as a policy block. A root LaunchDaemon
+  (`scripts/net.vivary.pf-parity.plist` + `vivary-pf-parity.sh`) keeps one
+  `nat on <utun>` rule per tunnel in a dedicated `vivary` pf anchor, rediscovered
+  on every network change; verified across VPN reconnect, reboot and utunN
+  renumbering. Default, not a flag — egress is where access gets limited.
+  SECURITY: the daemon runs a root-owned COPY in /usr/local/bin — this repo is
+  mounted rw into sandboxes and launchd does not check the program's owner, so
+  pointing it at `scripts/` = host root for any agent. Re-`install` after edits.
+  NEVER `pfctl -f` (flushes the runtime-inserted vmnet NAT -> no sandbox
+  internet until `container system stop/start`). DNS needs nothing: the gateway
+  relays the host resolver, `/etc/resolver` split zones included — if a VPN
+  name fails in a sandbox, `curl` it ON THE MAC first; on 2026-10-02 the host's
+  mDNSResponder failed the `.local` VPN zones for a whole boot and the sandbox
+  merely mirrored it (reboot fixed it, HUP did not). Open: the NAT covers the
+  whole sandbox /24, not per-sandbox. Spec:
+  docs/superpowers/plans/2026-09-29-host-network-parity.md
 - Windows host support (core/runtime layer is prepared; untested).
 - External plugins from `~/.vivary/plugins/` (loader designed for it).
 
