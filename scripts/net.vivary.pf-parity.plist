@@ -7,11 +7,20 @@
 
   <!-- Root: it loads a pf anchor. This is the ONLY reason vivary needs host
        privileges, and installing this daemon is what stops it needing sudo
-       interactively on every `up`. -->
+       interactively on every `up`.
+
+       The path is a root-owned COPY under /usr/local/bin, never the script in
+       the repo. This repo is itself mounted read-write into sandboxes, and
+       launchd checks the ownership of the plist but NOT of the program it
+       names — so pointing this at the working tree would hand any agent in
+       those sandboxes host root on the next network change. Install with:
+           sudo install -o root -g wheel -m 755 \
+               scripts/vivary-pf-parity.sh /usr/local/bin/vivary-pf-parity.sh
+       and re-run it after editing the script. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/jdk/work/incubator/agent-sandbox/apple-container-sandbox/scripts/vivary-pf-parity.sh</string>
+    <string>/usr/local/bin/vivary-pf-parity.sh</string>
   </array>
 
   <!-- At boot: survives a host restart with no manual step. -->
