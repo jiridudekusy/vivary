@@ -323,10 +323,18 @@ English, converse with the user in Czech.
   a normal working session climbed back to 210k (86% of the per-process cap)
   within ~10 min. So a periodic blind trim would tax every big walk, while a
   threshold-triggered one pays that minute only when a VM nears danger.
-  THE FLOOR is partly vivary's own: node-modules' `modules-watch` runs
-  `inotifywait -m -r` over the whole workspace (node_modules excluded) and held
-  43 306 watches; every watched directory's inode stays cached, so its host fd
-  can never be trimmed. Claude Code itself held 3 912.
+  THE FLOOR was mostly vivary's own: node-modules' `modules-watch` ran
+  `inotifywait -m -r --exclude '/node_modules...'` over the whole workspace and
+  held 43 306 watches — 20 564 of them INSIDE node_modules, because in
+  inotify-tools 3.22 `--exclude` only filters the reported EVENTS while `-r`
+  still watches every subdirectory (verified by inode against the watch table).
+  A watched directory stays cached, so its host fd can never be trimmed. Fixed:
+  the watcher now watches only depth 0..SANDBOX_MODULES_DEPTH, pruning
+  node_modules/.git/.hg exactly like the host scan, non-recursively
+  (`--fromfile`), and rebuilds the list when a directory appears inside the
+  limit — 4 950 watches, post-trim floor 43 493 -> 9 685 host fds. Claude Code
+  itself holds ~3 900 more. Existing kept containers keep the old script until
+  `--recreate` (or a hot swap of /usr/local/bin/modules-watch, see recipes).
   `vivary stats` maps VM processes to sandboxes by the images they hold open
   (`.../com.apple.container/containers/<id>/rootfs.ext4` at fds 3-9), because a
   Virtualization XPC process's parent is launchd, not the runtime.
@@ -377,7 +385,19 @@ English, converse with the user in Czech.
 
 - Non-TTY runs omit `-it` — `vivary start -- --version` works in scripts.
 - `container exec` + `pkill -f <pattern>`: pattern must not match the exec
-  shell's own cmdline (use `[x]` bracket trick).
+  shell's own cmdline (use `[x]` bracket trick). The trick only hides the
+  pattern ITSELF: if the same command line also names the target any other way
+  (`cp ... /usr/local/bin/modules-watch; pkill -f 'bin/modules-watc[h]'`), pkill
+  still kills its own shell (exit 143). Kill by PID from a separate exec.
+- node-modules watcher: `cli/plugins/node-modules/test-watch.sh` (header has
+  the `container run` line) — 14 checks in a throwaway container: watch set,
+  node_modules/.git/depth exclusion, the new-dir race, burst handling.
+  Hot-swapping it into a RUNNING sandbox (persists across stop/start, since the
+  kept container's rootfs does): copy the script to /usr/local/bin/modules-watch
+  as root, kill the old `bash .../modules-watch` AND its `inotifywait` child by
+  PID (the child survives its parent), then restart it as agent with
+  SANDBOX_WORKSPACE/SANDBOX_MODULES_DEPTH taken from /proc/1/environ, under
+  setsid so it outlives the exec.
 - Clipboard tests: back up user clipboard first (pbpaste > file), restore
   after. Compare via `od -An -tx1` (no xxd in image).
 - Full smoke: sandbox up with all flags → check hooks (`pgrep sshd/Xvfb/...`),
@@ -432,8 +452,6 @@ English, converse with the user in Czech.
   trims only the VM past ~50% of kern.maxfilesperproc, or any VM when the
   system table passes ~50%, and logs it. Host-side because the danger is
   host-global (other VMs, other apps); the guest cannot see it.
-- Shrink the floor: scope node-modules' `inotifywait -r` (43k permanent watches
-  on `smarta`) to the depth its scan actually uses instead of the whole tree.
 - Windows host support (core/runtime layer is prepared; untested).
 - External plugins from `~/.vivary/plugins/` (loader designed for it).
 
