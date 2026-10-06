@@ -34,6 +34,8 @@ vivary init [name]          write <workspace>/.vivary.json (committable project
 vivary up [name]            long-running container with sshd (Claude Desktop, IDEs)
 vivary down [name]          stop the long-running container
 vivary ls                   list sandboxes across both runtimes
+vivary stats [--trim]       how hard the VMs press on the Mac (RAM, CPU, open
+                         files); --trim releases the host files they pin
 vivary shell [name]         bash in the sandbox (auto-starts it if not running)
 vivary rm [name] [--purge]  remove container (--purge deletes state too)
 vivary build [base|agents]  build images

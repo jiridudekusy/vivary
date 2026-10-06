@@ -4,7 +4,11 @@ import path from 'node:path';
 import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, die, parseArgs, sanitizeName } from './util.mjs';
 import { termEnvArgs, termEnvVars } from './runtime.mjs';
 import { resolveRuntime, runtimeKind, runtimesRunning } from './runtimes/index.mjs';
-import { buildRunSpec } from './runtimes/spec.mjs';
+import { buildRunSpec, sandboxMemory } from './runtimes/spec.mjs';
+import {
+  DEFAULT_MEMORY_BUDGET, checkMemoryBudget, formatBudgetRefusal, formatBytes, hostSnapshot,
+  openFilesWarning, parseBudget, requestedMemoryBytes, runningVmMemory,
+} from './host.mjs';
 import {
   applyStickyFlags, containerConfigSnapshot, createSandbox, diffContainerConfig,
   ensureSandbox, formatConfigChanges, listSandboxNames, loadSandbox,
@@ -12,7 +16,7 @@ import {
 } from './sandbox.mjs';
 import { agentRegistry, getPlugins, pluginFlagDefs, pluginFlagSpec } from './plugins.mjs';
 import {
-  PROJECT_CONFIG_NAME, approveProjectConfig, loadGlobalConfig, loadProjectConfig,
+  PROJECT_CONFIG_NAME, approveProjectConfig, loadGlobalConfig, loadMemoryBudget, loadProjectConfig,
   markApproved, resolveEffectiveConfig, writeBackCliFlags,
 } from './config.mjs';
 import { brokerEnvArgs, brokerEnvVars } from './broker.mjs';
@@ -25,6 +29,8 @@ const CORE_FLAGS = {
   // down/up instead of being thrown away with --rm. --ephemeral restores the
   // old throwaway behaviour; --recreate rebuilds a kept container once.
   ephemeral: 'optional', recreate: 'boolean',
+  // One-off, never sticky: a standing exemption would defeat the budget.
+  'ignore-memory-budget': 'boolean',
 };
 
 function flagSpec() {
@@ -225,6 +231,7 @@ export async function cmdStart(argv, forcedAgent) {
     }
     process.exit(code);
   }
+  enforceHostLimits(ctx);
   const spec = await buildRunSpec(ctx, {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [agent.cmd, ...rest], termEnv: termEnvArgs(),
   });
@@ -263,6 +270,7 @@ export async function cmdShell(argv) {
     }
     process.exit(code);
   }
+  enforceHostLimits(ctx);
   const spec = await buildRunSpec(ctx, {
     rm: true, interactive: IS_TTY, image: IMAGE, command: [vm ? 'zsh' : 'bash'], termEnv: termEnvArgs(),
   });
@@ -270,6 +278,43 @@ export async function cmdShell(argv) {
   applyVmContribute(spec, contrib);
   await vmBootAndPostUp(rt, spec, ctx);
   process.exit(rt.run(spec));
+}
+
+// Host limits, checked before ANY sandbox VM boots — `up`, `resume`, and
+// `start`/`shell` when they have to start one. Memory is enforced; open files
+// are only warned about (see openFilesWarning).
+//
+// The budget sums CONFIGURED sizes, not RSS: a Linux guest fills its RAM with
+// page cache and Virtualization.framework does not take it back, so the
+// configured size is where every VM ends up. Several sandboxes that each looked
+// small at boot are how the Mac got taken down.
+//
+// Throws rather than die()s, so `resume` reports a sandbox that does not fit and
+// goes on to the next one — a smaller one may still fit.
+export function enforceHostLimits(ctx) {
+  if (process.platform !== 'darwin') return;
+  const { cfg, flags } = ctx;
+  const host = hostSnapshot();
+  const warning = openFilesWarning(host.files);
+  if (warning) console.error(`==> ${warning}`);
+  // docker sandboxes live inside Docker Desktop's fixed-size VM (counted for
+  // the others' sake by runningVmMemory): starting one adds no VM of its own.
+  if (cfg.runtime === 'docker') return;
+  const setting = loadMemoryBudget(pluginFlagDefs()) ?? DEFAULT_MEMORY_BUDGET;
+  const budget = parseBudget(setting, host.memBytes);
+  const requestBytes = requestedMemoryBytes(sandboxMemory(flags), cfg.runtime);
+  const committed = runningVmMemory();
+  const { ok, total } = checkMemoryBudget({ budgetBytes: budget.bytes, committed, requestBytes });
+  if (ok) return;
+  if (flags['ignore-memory-budget']) {
+    console.error(`==> WARNING: VMs will be configured for ${formatBytes(total)}, over the `
+      + `${formatBytes(budget.bytes)} budget (${budget.label}) — starting anyway (--ignore-memory-budget)`);
+    return;
+  }
+  throw new Error(formatBudgetRefusal({
+    name: cfg.name, runtime: cfg.runtime, mode: ctx.mode,
+    requestBytes, committed, budget, total, setting,
+  }));
 }
 
 // Bring a PERSISTENT container into the running state, creating it only if it
@@ -350,6 +395,8 @@ export function requireReachable(cfg, plugins = getPlugins()) {
 // what keeps that from happening again.
 async function ensureUpContainer(ctx, rt, { recreate = false } = {}) {
   const { cfg } = ctx;
+  // Before preUp: a refused start must not leave plugin side effects behind.
+  enforceHostLimits(ctx);
   const vm = runtimeKind(cfg.runtime) === 'vm-tart';
   if (!vm) {
     for (const p of getPlugins()) {

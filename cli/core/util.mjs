@@ -89,8 +89,10 @@ export function hasCmd(cmd) {
   return spawnSync(probe, [cmd], { stdio: 'ignore' }).status === 0;
 }
 
-export function capture(cmd, args) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' });
+// `timeout` (ms) bounds a probe that may hang — e.g. `docker info` while Docker
+// Desktop is half-started. A timed-out command reports status 1.
+export function capture(cmd, args, { timeout, maxBuffer } = {}) {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout, maxBuffer });
   return { status: r.status ?? 1, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 

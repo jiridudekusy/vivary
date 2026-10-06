@@ -13,7 +13,9 @@ English, converse with the user in Czech.
   (sandbox.json, **sticky flags** as a generic service), lifecycle
   (start/up/down/shell/ls/rm/create/init), config (`.vivary.json` loader +
   approval gate, see below), broker kernel (HTTP, token, audit log —
-  routes come from plugins), build (fat-image composer), plugin loader.
+  routes come from plugins), build (fat-image composer), plugin loader,
+  host (host/VM resource probes + the memory budget gate), stats
+  (`vivary stats`).
 - Project config: `<workspace>/.vivary.json` (committable; agent, runtime,
   memory/cpus, sticky `flags`, `egress: {presets, allow}`) — created by
   `vivary init`, unknown keys die loudly. Global defaults in
@@ -112,6 +114,18 @@ English, converse with the user in Czech.
   because the persistent container's config snapshot records it, the symptom was
   not a quiet downgrade but `up` REFUSING to start ("memory: 20g -> 8g").
 - Loud failures, never silent (overlay binds, npmrc env refs, ...).
+- Memory BUDGET: every VM start (`up`, `resume`, and `start`/`shell` when they
+  boot one) is refused when the CONFIGURED memory of all running VMs plus the new
+  one exceeds `memoryBudget` (default `50%` of host RAM; `"40g"` also works).
+  Counts every Apple `container` VM (buildkit, ashp too), running tart VMs, and
+  Docker Desktop's VM once; docker sandboxes add nothing (they live inside it).
+  Configured, not RSS: a Linux guest fills its RAM with page cache and
+  Virtualization.framework does not take it back. `memoryBudget` lives ONLY in
+  `~/.vivary/vivary.json` and applies even when a project file exists — a project
+  `.vivary.json` is agent-writable, so it may not set it (dies loudly). The gate
+  throws instead of die()ing so `resume` skips a sandbox that does not fit and
+  carries on. `--ignore-memory-budget` is one-off, never sticky. Pure pieces in
+  `core/host.mjs`, unit-tested.
 
 ## Hard-won platform gotchas
 
@@ -282,6 +296,25 @@ English, converse with the user in Czech.
   empty by itself. Verified on Apple `container` (8 GB sandbox, kernel 6.18,
   docker 29.1.3): single- and multi-node `kind create cluster` Ready, nginx
   deployment + service DNS reachable, `docker run --memory=256m` honoured.
+- virtiofs PINS HOST FILES: Apple's virtiofs keeps one host fd open in the VM
+  process for every file/dir the guest kernel holds in its dentry/inode cache.
+  A sandbox walking a big workspace runs that into the hundreds of thousands —
+  measured on `smarta` (workspace + node-modules share): 151k host fds 4 min
+  after start, 190k a few minutes later; the per-process cap is
+  kern.maxfilesperproc (245 760 on a 64 GB Mac) and the SYSTEM table
+  kern.maxfiles (491 520) is shared by every app. Two such VMs fill it: on
+  2026-10-01 the log showed `Too many open files in system` (ENFILE) at 21:48,
+  logging stopped at 21:49 and the Mac came back from a WATCHDOG reset
+  (`Boot faults: wdog` in ResetCounter*.diag). Relief, verified: drop the
+  guest's caches (`sync; echo 2 > /proc/sys/vm/drop_caches`, as root via
+  `container exec --user root`) -> 189 945 -> 27 310 host fds at once, no harm
+  beyond a cold metadata cache. `vivary stats --trim` does that for every
+  running sandbox. `vfs_cache_pressure` alone does NOT help: reclaim only runs
+  under guest memory pressure, and an 8 GB guest rarely has any. What stays
+  after a trim is pinned by live use (inotify watches, open files).
+  `vivary stats` maps VM processes to sandboxes by the images they hold open
+  (`.../com.apple.container/containers/<id>/rootfs.ext4` at fds 3-9), because a
+  Virtualization XPC process's parent is launchd, not the runtime.
 - PID 1 must REAP: the payload command (`sleep infinity` for `up`, agent/bash
   for `start`/`shell`) never calls wait(), but entrypoint hooks leave daemons
   (sshd, Xvfb, clipboard-sync) that reparent to PID 1 — so every orphan that
@@ -366,6 +399,22 @@ English, converse with the user in Czech.
   merely mirrored it (reboot fixed it, HUP did not). Open: the NAT covers the
   whole sandbox /24, not per-sandbox. Spec:
   docs/superpowers/plans/2026-09-29-host-network-parity.md
+- `vivary vpn` command (asked 2026-10-06): routing parity exists but is a
+  manual one-time `sudo install` + `launchctl bootstrap` of the LaunchDaemon.
+  Wanted: enable it any time, for any VPN, from vivary itself — e.g.
+  `vivary vpn enable|disable|status`: install/remove the root-owned script copy
+  and the plist (one sudo prompt), register the `vivary` nat-anchor in
+  /etc/pf.conf if missing (that step is the destructive one — it needs the
+  `container system stop/start` dance, so the command must say so and ask),
+  and `status` showing which tunnels are NATed right now. Discovery is already
+  per-VPN-agnostic (every addressed `utun` except Tailscale's CGNAT one);
+  open question whether the user should pick tunnels (`--only SMARTA`) and
+  whether to scope it per sandbox instead of the whole /24.
+- Automatic fd trimming: `vivary stats --trim` is manual. Options: a guest-side
+  daemon dropping dentries every N minutes (simple, blind), or host-driven
+  (the broker/LaunchAgent trims a sandbox when its VM passes X% of
+  kern.maxfilesperproc or the system table passes Y%). Measure the cost of a
+  cold dentry cache on a big `npm install`/`tsc` first.
 - Windows host support (core/runtime layer is prepared; untested).
 - External plugins from `~/.vivary/plugins/` (loader designed for it).
 

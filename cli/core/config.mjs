@@ -21,6 +21,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { IS_TTY, SANDBOXES_DIR, ask, die } from './util.mjs';
+import { parseBudget } from './host.mjs';
 
 export const PROJECT_CONFIG_NAME = '.vivary.json';
 export const APPROVED_COPY_NAME = 'vivary-approved.json';
@@ -38,17 +39,33 @@ const RENAMED_FLAGS = { 'own-modules': 'node-modules' };
 
 // Validate a parsed config object. `scope` is 'project' | 'global' (the
 // global file supports the same keys except `egress` — policy is
-// project-scoped). `knownFlags` maps flag name -> parseArgs type
+// project-scoped — plus `memoryBudget`, which is host policy and global-only). `knownFlags` maps flag name -> parseArgs type
 // ('boolean' | 'optional' | 'string'); unknown keys and unknown flags fail
 // loudly (typo protection), never silently.
 export function validateConfig(cfg, { scope = 'project', file = PROJECT_CONFIG_NAME, knownFlags = {} } = {}) {
   if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
     throw new Error(`${file}: must be a JSON object`);
   }
-  const known = new Set([...SCALAR_KEYS, 'flags', ...(scope === 'project' ? ['egress'] : [])]);
+  const known = new Set([
+    ...SCALAR_KEYS, 'flags',
+    ...(scope === 'project' ? ['egress'] : []),
+    ...(scope === 'global' ? ['memoryBudget'] : []),
+  ]);
   for (const key of Object.keys(cfg)) {
+    if (key === 'memoryBudget' && scope !== 'global') {
+      throw new Error(`${file}: 'memoryBudget' is host policy — set it in ${globalConfigFile()}, `
+        + 'not in a project file (which the agent can write)');
+    }
     if (!known.has(key)) {
       throw new Error(`${file}: unknown key '${key}' (known: ${[...known].join(', ')})`);
+    }
+  }
+  if (cfg.memoryBudget !== undefined) {
+    if (typeof cfg.memoryBudget !== 'string') throw new Error(`${file}: 'memoryBudget' must be a string ('50%' or '32g')`);
+    try {
+      parseBudget(cfg.memoryBudget, 1024 ** 3);
+    } catch (e) {
+      throw new Error(`${file}: ${e.message}`);
     }
   }
   for (const key of SCALAR_KEYS) {
@@ -237,6 +254,14 @@ export function loadProjectConfig(workspace, knownFlags) {
 
 export function loadGlobalConfig(knownFlags) {
   return loadConfigFile(globalConfigFile(), { scope: 'global', knownFlags });
+}
+
+// memoryBudget is HOST policy, not a per-project default, so it is the one key
+// of the global file that applies whether or not a project .vivary.json exists.
+// A project file may not set it at all: that file is agent-writable, and the
+// ceiling that protects the Mac must not be raisable from inside a sandbox.
+export function loadMemoryBudget(knownFlags) {
+  return loadGlobalConfig(knownFlags)?.config?.memoryBudget;
 }
 
 // Record approval: verbatim copy for future diffs + hash in sandbox.json.

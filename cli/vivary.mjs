@@ -9,12 +9,14 @@
 // routes. Agent launchers (slaude, sodex, sursor) dispatch on the binary name.
 import path from 'node:path';
 import { die, migrateLegacyHome, parseArgs, pkg } from './core/util.mjs';
-import { loadPlugins, agentRegistry, pluginCommands, pluginHelp } from './core/plugins.mjs';
+import { loadPlugins, agentRegistry, pluginCommands, pluginFlagDefs, pluginHelp } from './core/plugins.mjs';
 import { cmdBroker } from './core/broker.mjs';
 import { cmdBuild } from './core/build.mjs';
 import {
   cmdCreate, cmdDown, cmdInit, cmdList, cmdResume, cmdRm, cmdShell, cmdStart, cmdUp,
 } from './core/lifecycle.mjs';
+import { cmdStats } from './core/stats.mjs';
+import { loadMemoryBudget } from './core/config.mjs';
 
 function help(launchers) {
   const launcherLines = Object.entries(launchers)
@@ -56,6 +58,13 @@ Commands:
   ide [name]           Open Cursor/VS Code into the sandbox via Remote-SSH
                        (implies 'up' when needed; --editor <bin> to force).
   ls | list            List sandboxes across runtimes.
+  stats [--trim] [--json]
+                       How hard the VMs press on this Mac: RAM, CPU, swap,
+                       and the kernel tables that have frozen it — open files
+                       above all (virtiofs keeps a host file open for every
+                       file a guest has cached). --trim makes the sandboxes
+                       drop that cache, which releases those files at once.
+                       Exits 2 when something is critical.
   shell [name]         Bash in the sandbox (attaches if running, otherwise
                        starts a container; auto-creates like start).
   rm [name] [--purge]  Remove the container (--purge also deletes state).
@@ -76,7 +85,12 @@ Core options (start/create/up/shell):
   --runtime <r>        docker | container | tart — chosen at creation, stored per
                        sandbox (default: $SANDBOX_RUNTIME, else autodetect)
   --agent <a>          Default agent for the sandbox
-  --memory <m>         Container memory (default: $SANDBOX_MEMORY or 4g)
+  --memory <m>         Container memory (default: $SANDBOX_MEMORY or 4g). Sticky.
+                       All running VMs together may be configured for at most
+                       half the Mac's RAM — set "memoryBudget" ("60%", "40g")
+                       in ~/.vivary/vivary.json; a start over it is refused.
+  --ignore-memory-budget
+                       Start this once even if it goes over the budget.
   --cpus <n>           Container CPUs (default: $SANDBOX_CPUS or 4)
   --ephemeral[=off]    Throw the container away on exit (the pre-persistence
                        behaviour). Sticky. By default containers are KEPT, so
@@ -151,6 +165,9 @@ async function main() {
     case 'ls':
     case 'list':
       cmdList();
+      break;
+    case 'stats':
+      cmdStats(rest, { loadGlobalBudget: () => loadMemoryBudget(pluginFlagDefs()) });
       break;
     case 'shell':
       await cmdShell(rest);
