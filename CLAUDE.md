@@ -312,6 +312,21 @@ English, converse with the user in Czech.
   running sandbox. `vfs_cache_pressure` alone does NOT help: reclaim only runs
   under guest memory pressure, and an 8 GB guest rarely has any. What stays
   after a trim is pinned by live use (inotify watches, open files).
+  COST of a trim, measured 2026-10-06 on `smarta` (median of 3, warm vs first
+  run after `drop_caches`): `rg --files` over the workspace 4.7 s -> 67 s;
+  `find node_modules -type f` (85k files) 2.5 s -> 77 s; `git status` (7.7k
+  files) 0.23 s -> 3.5 s; `rg` content search in one repo 3.0 -> 3.6 s;
+  `npm ls --all` unaffected (it reads node_modules/.package-lock.json instead of
+  walking). Cold virtiofs metadata runs at ~1.1k lookups/s, so the first
+  whole-tree walk after a trim costs about a minute. GROWTH: from the ~33k
+  floor, one workspace `rg --files` pinned +30k and one node_modules walk +72k;
+  a normal working session climbed back to 210k (86% of the per-process cap)
+  within ~10 min. So a periodic blind trim would tax every big walk, while a
+  threshold-triggered one pays that minute only when a VM nears danger.
+  THE FLOOR is partly vivary's own: node-modules' `modules-watch` runs
+  `inotifywait -m -r` over the whole workspace (node_modules excluded) and held
+  43 306 watches; every watched directory's inode stays cached, so its host fd
+  can never be trimmed. Claude Code itself held 3 912.
   `vivary stats` maps VM processes to sandboxes by the images they hold open
   (`.../com.apple.container/containers/<id>/rootfs.ext4` at fds 3-9), because a
   Virtualization XPC process's parent is launchd, not the runtime.
@@ -410,11 +425,15 @@ English, converse with the user in Czech.
   per-VPN-agnostic (every addressed `utun` except Tailscale's CGNAT one);
   open question whether the user should pick tunnels (`--only SMARTA`) and
   whether to scope it per sandbox instead of the whole /24.
-- Automatic fd trimming: `vivary stats --trim` is manual. Options: a guest-side
-  daemon dropping dentries every N minutes (simple, blind), or host-driven
-  (the broker/LaunchAgent trims a sandbox when its VM passes X% of
-  kern.maxfilesperproc or the system table passes Y%). Measure the cost of a
-  cold dentry cache on a big `npm install`/`tsc` first.
+- Automatic fd trimming: `vivary stats --trim` is manual. Measured (see the
+  virtiofs gotcha): a trim costs ~1 min on the next whole-tree walk and a VM
+  regrows to danger in ~10 min of active work. So NOT periodic: host-driven and
+  threshold-triggered — e.g. a user LaunchAgent running a check every 60 s that
+  trims only the VM past ~50% of kern.maxfilesperproc, or any VM when the
+  system table passes ~50%, and logs it. Host-side because the danger is
+  host-global (other VMs, other apps); the guest cannot see it.
+- Shrink the floor: scope node-modules' `inotifywait -r` (43k permanent watches
+  on `smarta`) to the depth its scan actually uses instead of the whole tree.
 - Windows host support (core/runtime layer is prepared; untested).
 - External plugins from `~/.vivary/plugins/` (loader designed for it).
 
