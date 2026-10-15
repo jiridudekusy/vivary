@@ -52,7 +52,17 @@ English, converse with the user in Czech.
   the LAN by accident; tart has no publish at all, so there it only prints
   the guest URL. node-modules: `--node-modules[=N]` scans, or an explicit
   array of workspace-relative dirs in `.vivary.json` (exact list, live
-  watcher off). Flag types: `boolean|optional|string|list`; `list` is
+  watcher off). On Apple `container` the overlays live on a per-sandbox
+  VOLUME `vivary-<name>-modules` (256G sparse ext4, mounted at
+  /vivary-modules-store), NOT on the Mac: survives `--recreate`, deleted by
+  `rm --purge` (onPurge). The host share ~/.vivary/<name>/modules now carries
+  only the manifest (+ legacy data, migrated once onto the volume by
+  bind-modules at the first start). The plugin's `containerSnapshot` adds
+  `nodeModulesStore: volume`, so a kept container from before is refused with
+  the --recreate hint; `postUp` waits for bind-modules' boot_id marker
+  (/run/vivary-modules.ready) so no agent runs before the overlay. Docker
+  still binds host dirs per package (follow-up: docker volumes, needs a chown
+  of the root-owned volume dir). Flag types: `boolean|optional|string|list`; `list` is
   repeatable and may carry a `short` alias, and `list: true` on another type
   lets that flag also take an array in `.vivary.json`.
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
@@ -242,6 +252,12 @@ English, converse with the user in Czech.
   hence the `uunpm` egress preset, contributed AUTOMATICALLY via the new
   `egressPresets(cfg)` plugin hook rather than left to `.vivary.json` (a
   forgotten preset shows up as a broken install, not as a visible denial).
+  Build cache key vs registry outage: the uu-safe-* versions resolved on the
+  host ARE the install layer's cache key. On 2026-10-15 repo.plus4u.net
+  answered HTTP 500; a failed probe used to fall back to bare names, which
+  changed the key, busted the layer and made the rebuild need the registry that
+  was down — every `vivary build` failed. Now the last resolved versions are
+  kept in ~/.vivary/.build/uunpm-versions.json and reused on a failed probe.
 - Image freshness: a bare `vivary build` refreshes almost NOTHING. The plugin
   build args bust only their own layers (Claude Code, uu-safe-*); the ubuntu
   base and every apt/Node/JDK/Gradle/Playwright layer stay cached indefinitely.
@@ -338,6 +354,24 @@ English, converse with the user in Czech.
   `vivary stats` maps VM processes to sandboxes by the images they hold open
   (`.../com.apple.container/containers/<id>/rootfs.ext4` at fds 3-9), because a
   Virtualization XPC process's parent is launchd, not the runtime.
+  THE LIMIT THAT RUNS OUT IS VNODES, not kern.maxfiles: the broker died of
+  ENFILE inside `stat`, which takes no file descriptor — only a vnode. macOS
+  keeps the vnode table full as a cache (num_vnodes == maxvnodes, 263 168,
+  always) and recycles from its free list; a file held open cannot be
+  recycled. Watch `kern.free_vnodes` (~148k free with no VM running). A native
+  walk of 500k files on the Mac moved it by 4k; a VM walking 85k files through
+  virtiofs pinned 82k. Only VM-shared files do this — natively the Mac recycles.
+  The exact edge is unknown: `smarta` once held 210k without a crash, so macOS
+  can give back some of its own in-use vnodes under pressure.
+  NODE_MODULES OFF THE BRIDGE (2026-10-15): measured on the same 85k-file
+  tree — virtiofs share / VM rootfs / named volume: write all 54 s / 2.0 s /
+  0.8 s; walk warm 2.6 / 0.13 / 0.16 s; walk cold 99 / 0.14 / 0.16 s; host files
+  pinned +82 671 / +1 / +1. Hence the store volume (see node-modules above).
+  Apple volumes and rootfs are sparse ext4 images on virtio-blk with discard:
+  deleted space returns to the Mac only after `fstrim`, which needs
+  CAP_SYS_ADMIN (bind-modules runs it once per boot; node-modules sandboxes
+  have caps ALL). A volume can be attached to ONE container at a time ("The
+  storage device attachment is invalid").
 - PID 1 must REAP: the payload command (`sleep infinity` for `up`, agent/bash
   for `start`/`shell`) never calls wait(), but entrypoint hooks leave daemons
   (sshd, Xvfb, clipboard-sync) that reparent to PID 1 — so every orphan that
@@ -372,6 +406,17 @@ English, converse with the user in Czech.
   (via=editor) stays unrestricted — it only edits. Pure predicates
   (isPrivateHost/domainAllowed/pathSafeToDefaultOpen) are exported for tests.
   NOT covered: DNS names resolving to private IPs (rebinding) — out of scope.
+- The "broker wedge" was a CRASH: 18 times between 2026-09-04 and 2026-10-06 an
+  uncaught ENFILE from `fs.statSync` (listSandboxNames, called per request to
+  resolve the token) killed the process, and nothing restarted it until the
+  next `vivary` command (gaps of minutes to 30 h) — from the sandbox it looked
+  like clipboard/host-open hanging. Per request it stat'ed every dir in
+  ~/.vivary and read every token file (~80 file ops, several times a second per
+  sandbox from clipboard polling), so it was the first process on the Mac to hit
+  the vnode limit. Now: token -> sandbox cache (rescan only on a miss, at most
+  every 5 s; a hit re-reads that one token file), errors caught per request
+  (503) plus uncaughtException/unhandledRejection handlers, and every ENFILE is
+  logged as a greppable `ENFILE ...` line that `vivary stats` counts (24 h).
 - inotify race: new dir + immediate file creation misses events →
   modules-watch also handles directory-create events with a settle+rescan.
 - --sudo cannot exceed the HOST user's file rights: on macOS the mount
@@ -398,6 +443,16 @@ English, converse with the user in Czech.
   PID (the child survives its parent), then restart it as agent with
   SANDBOX_WORKSPACE/SANDBOX_MODULES_DEPTH taken from /proc/1/environ, under
   setsid so it outlives the exec.
+- node-modules store: `cli/plugins/node-modules/test-bind.sh` (header has the
+  setup) — 15 checks in a throwaway container with a real volume: migration off
+  the share, agent ownership, setuid stripped, symlinks kept as links, ready
+  marker, fstrim marker, idempotent re-run. It must go through the image's own
+  ENTRYPOINT as agent with SANDBOX_SUDO=1: bind-modules reads the workspace from
+  PID 1's environment AS AGENT, so `--user root --entrypoint bash` makes it
+  refuse (by design). End to end with a scratch sandbox: up with
+  --node-modules, npm install lands on the volume (findmnt FSTYPE ext4) and not
+  on the Mac, survives down/up and --recreate, legacy dir migrates, a stripped
+  snapshot key is refused, rm --purge deletes the volume.
 - Clipboard tests: back up user clipboard first (pbpaste > file), restore
   after. Compare via `od -An -tx1` (no xxd in image).
 - Full smoke: sandbox up with all flags → check hooks (`pgrep sshd/Xvfb/...`),
@@ -445,13 +500,13 @@ English, converse with the user in Czech.
   per-VPN-agnostic (every addressed `utun` except Tailscale's CGNAT one);
   open question whether the user should pick tunnels (`--only SMARTA`) and
   whether to scope it per sandbox instead of the whole /24.
-- Automatic fd trimming: `vivary stats --trim` is manual. Measured (see the
-  virtiofs gotcha): a trim costs ~1 min on the next whole-tree walk and a VM
-  regrows to danger in ~10 min of active work. So NOT periodic: host-driven and
-  threshold-triggered — e.g. a user LaunchAgent running a check every 60 s that
-  trims only the VM past ~50% of kern.maxfilesperproc, or any VM when the
-  system table passes ~50%, and logs it. Host-side because the danger is
-  host-global (other VMs, other apps); the guest cannot see it.
+- Automatic fd trimming: DEFERRED (decided 2026-10-15). With node_modules on
+  the volume and the watcher fixed, only workspace sources still pin host
+  files. Build it only if `ENFILE` lines reappear in broker.log (`vivary stats`
+  reports them). Design if needed: host-driven, threshold-triggered on
+  kern.free_vnodes (not maxfiles), user LaunchAgent every 60 s, trim only the
+  heaviest VM, 10-min cooldown per VM, log every trim. A trim costs ~1 min on
+  the next whole-tree walk, so never periodic.
 - Windows host support (core/runtime layer is prepared; untested).
 - External plugins from `~/.vivary/plugins/` (loader designed for it).
 
