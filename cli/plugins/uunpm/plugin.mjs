@@ -7,7 +7,9 @@
 // The wrappers are baked into the image (see image.dockerfile); this plugin
 // only decides whether npm/npx are ALIASED to them, via a PATH shim linked in
 // by the 47-uunpm hook. No flag -> plain npm/npx, same as before.
-import { capture, die } from '../../core/util.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { SANDBOXES_DIR, capture, die } from '../../core/util.mjs';
 
 // Only registry that carries the uu-safe-* family (anonymous read).
 const REGISTRY = process.env.VIVARY_UUNPM_REGISTRY
@@ -26,24 +28,65 @@ export function parseNpmVersion(text) {
   return /^\d+\.\d+\.\d+/.test(v) ? v : null;
 }
 
+// Last versions resolved from the registry, per package. They are the build's
+// cache key, so they have to survive an outage: on 2026-10-15
+// repo.plus4u.net answered HTTP 500, the probes fell back to bare names, the
+// changed key busted the install layer, and the rebuild then needed the very
+// registry that was down — every `vivary build` failed, whatever it changed.
+const LAST_KNOWN_FILE = path.join(SANDBOXES_DIR, '.build', 'uunpm-versions.json');
+
+function readLastKnown(file = LAST_KNOWN_FILE) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLastKnown(map, file = LAST_KNOWN_FILE) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify(map, null, 2)}\n`);
+  } catch {
+    // best effort: a missed write only costs pinning on a later outage
+  }
+}
+
 // Resolve every package's current version so the install layer busts exactly
-// when one of them ships. A failed probe is NOT fatal — fall back to the bare
-// name (npm resolves 'latest' itself); the build then just loses cache-busting
-// precision, so say so instead of failing the whole build.
+// when one of them ships. A failed probe is NOT fatal: reuse the version last
+// resolved for that package, which keeps the cache key — and so the cached
+// layer — exactly as it was; with none on record, fall back to the bare name
+// (npm resolves 'latest' itself) and say the build lost its pin.
 export function resolveSafeSpecs(packages = PACKAGES,
-  view = (pkg) => capture('npm', ['view', pkg, 'version', '--registry', REGISTRY])) {
+  view = (pkg) => capture('npm', ['view', pkg, 'version', '--registry', REGISTRY]),
+  { lastKnown = readLastKnown(), save = writeLastKnown } = {}) {
   const specs = [];
+  const reused = [];
   const unresolved = [];
+  const known = { ...lastKnown };
   for (const pkg of packages) {
     const r = view(pkg);
     const version = r.status === 0 ? parseNpmVersion(r.stdout) : null;
-    if (version) specs.push(`${pkg}@${version}`);
-    else { specs.push(pkg); unresolved.push(pkg); }
+    if (version) {
+      specs.push(`${pkg}@${version}`);
+      known[pkg] = version;
+    } else if (lastKnown[pkg]) {
+      specs.push(`${pkg}@${lastKnown[pkg]}`);
+      reused.push(`${pkg}@${lastKnown[pkg]}`);
+    } else {
+      specs.push(pkg);
+      unresolved.push(pkg);
+    }
+  }
+  if (reused.length) {
+    console.error(`WARNING: ${REGISTRY} did not answer — reusing the last resolved `
+      + `${reused.join(', ')} so the cached install layer stays valid`);
   }
   if (unresolved.length) {
     console.error(`WARNING: could not resolve versions from ${REGISTRY} for: ${unresolved.join(', ')} — `
       + 'building unpinned (a cached install layer may keep an older version)');
   }
+  save(known);
   return specs.join(' ');
 }
 

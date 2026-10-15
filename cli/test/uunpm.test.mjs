@@ -18,10 +18,36 @@ test('parseNpmVersion accepts a version and rejects npm noise', () => {
   assert.equal(parseNpmVersion(undefined), null);
 });
 
+const noState = { lastKnown: {}, save: () => {} };
+
+test('an outage reuses the last resolved versions, so the cache key does not move', () => {
+  const errs = [];
+  const orig = console.error;
+  console.error = (m) => errs.push(m);
+  let saved;
+  try {
+    const down = () => ({ status: 1, stdout: '', stderr: 'E500' });
+    const specs = resolveSafeSpecs(['uu-safe-npm', 'uu-safe-npx'], down,
+      { lastKnown: { 'uu-safe-npm': '1.4.1', 'uu-safe-npx': '1.4.1' }, save: (m) => { saved = m; } });
+    assert.equal(specs, 'uu-safe-npm@1.4.1 uu-safe-npx@1.4.1');
+  } finally {
+    console.error = orig;
+  }
+  assert.match(errs[0], /reusing the last resolved uu-safe-npm@1\.4\.1, uu-safe-npx@1\.4\.1/);
+  assert.deepEqual(saved, { 'uu-safe-npm': '1.4.1', 'uu-safe-npx': '1.4.1' });
+});
+
+test('a successful probe records the version for the next outage', () => {
+  let saved;
+  resolveSafeSpecs(['uu-safe-npm'], () => ({ status: 0, stdout: '1.5.0' }),
+    { lastKnown: { 'uu-safe-npm': '1.4.1' }, save: (m) => { saved = m; } });
+  assert.deepEqual(saved, { 'uu-safe-npm': '1.5.0' });
+});
+
 test('every package is pinned separately — the family may diverge', () => {
   const versions = { 'uu-safe-npm': '1.4.1', 'uu-safe-npx': '1.5.0' };
   const specs = resolveSafeSpecs(['uu-safe-npm', 'uu-safe-npx'],
-    (pkg) => ({ status: 0, stdout: versions[pkg], stderr: '' }));
+    (pkg) => ({ status: 0, stdout: versions[pkg], stderr: '' }), noState);
   assert.equal(specs, 'uu-safe-npm@1.4.1 uu-safe-npx@1.5.0');
 });
 
@@ -30,10 +56,10 @@ test('an unreachable registry warns and degrades to unpinned, never fails the bu
   const orig = console.error;
   console.error = (m) => errs.push(m);
   try {
-    assert.equal(resolveSafeSpecs(['uu-safe-npm'], () => ({ status: 7, stdout: '', stderr: 'no net' })),
+    assert.equal(resolveSafeSpecs(['uu-safe-npm'], () => ({ status: 7, stdout: '', stderr: 'no net' }), noState),
       'uu-safe-npm');
     // an npm error page must not be mistaken for a version
-    assert.equal(resolveSafeSpecs(['uu-safe-npx'], ok('npm error 404 Not Found')), 'uu-safe-npx');
+    assert.equal(resolveSafeSpecs(['uu-safe-npx'], ok('npm error 404 Not Found'), noState), 'uu-safe-npx');
   } finally {
     console.error = orig;
   }
@@ -47,7 +73,7 @@ test('a partly resolvable family pins what it can', () => {
   console.error = (m) => errs.push(m);
   try {
     const specs = resolveSafeSpecs(['good', 'bad'],
-      (pkg) => (pkg === 'good' ? { status: 0, stdout: '1.4.1' } : { status: 1, stdout: '' }));
+      (pkg) => (pkg === 'good' ? { status: 0, stdout: '1.4.1' } : { status: 1, stdout: '' }), noState);
     assert.equal(specs, 'good@1.4.1 bad');
   } finally {
     console.error = orig;
