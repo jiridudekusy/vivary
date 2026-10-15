@@ -29,30 +29,93 @@ export function sandboxBrokerToken(name) {
   return fs.readFileSync(file, 'utf8').trim();
 }
 
+const tokenMatches = (have, want) => {
+  const a = Buffer.from(have);
+  return a.length === want.length && crypto.timingSafeEqual(a, want);
+};
+
+function readToken(name) {
+  try {
+    return fs.readFileSync(path.join(sandboxDir(name), 'broker-token'), 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+// token -> sandbox name. Resolving a token used to walk EVERY sandbox dir
+// (a stat each) and read EVERY token file on EVERY request — ~80 file
+// operations, several times a second per sandbox, since clipboard sync polls.
+// That made the broker the busiest file-opener on the Mac, so it was the first
+// thing to hit ENFILE when sandbox VMs had pinned the host's vnodes — and 18
+// times between 2026-09-04 and 2026-10-06 the uncaught error killed it, leaving
+// clipboard/host-open dead until the next `vivary` command restarted it.
+//
+// The map is rebuilt only on a miss (a sandbox created since), at most once
+// per REBUILD_MS so a stream of bad tokens cannot turn it back into a scan per
+// request. A hit is re-checked against that one sandbox's token file, so a
+// token from a purged and re-created sandbox of the same name stops working.
+const REBUILD_MS = 5000;
+const tokenCache = { map: new Map(), builtAt: 0 };
+
+function rebuildTokenCache(now) {
+  const map = new Map();
+  for (const name of listSandboxNames()) {
+    const tok = readToken(name);
+    if (tok) map.set(tok, name);
+  }
+  tokenCache.map = map;
+  tokenCache.builtAt = now;
+}
+
 // Resolve the sandbox whose broker token equals the presented one, comparing in
 // constant time. Returns null if none matches.
-function sandboxByToken(presented) {
+export function sandboxByToken(presented, { now = Date.now() } = {}) {
   if (!presented) return null;
   const want = Buffer.from(String(presented));
-  for (const name of listSandboxNames()) {
-    let tok;
-    try {
-      tok = fs.readFileSync(path.join(sandboxDir(name), 'broker-token'), 'utf8').trim();
-    } catch {
-      continue;
+  const lookup = () => {
+    for (const [tok, name] of tokenCache.map) {
+      if (tokenMatches(tok, want)) return name;
     }
-    const have = Buffer.from(tok);
-    if (have.length === want.length && crypto.timingSafeEqual(have, want)) {
-      return loadSandbox(name);
-    }
+    return null;
+  };
+  let name = lookup();
+  if (!name && now - tokenCache.builtAt >= REBUILD_MS) {
+    rebuildTokenCache(now);
+    name = lookup();
   }
-  return null;
+  if (!name) return null;
+  const current = readToken(name);
+  if (!current || !tokenMatches(current, want)) {
+    tokenCache.builtAt = 0; // stale entry: force a rebuild on the next miss
+    return null;
+  }
+  return loadSandbox(name);
+}
+
+export function resetTokenCache() {
+  tokenCache.map = new Map();
+  tokenCache.builtAt = 0;
 }
 
 export function brokerLog(line) {
   fs.mkdirSync(BROKER_DIR, { recursive: true });
   fs.appendFileSync(path.join(BROKER_DIR, 'broker.log'),
     `${new Date().toISOString()} ${line}\n`);
+}
+
+// One greppable line per error. ENFILE gets its own tag and a pointer: it means
+// the whole Mac ran out of file handles, which `vivary stats` counts from here.
+export function brokerError(where, e) {
+  const code = e?.code || e?.name || 'Error';
+  const line = code === 'ENFILE'
+    ? `ENFILE ${where}: the Mac is out of file handles (${e.message}) — see vivary stats`
+    : `ERROR ${where}: ${code} ${e?.message || e}`;
+  try {
+    brokerLog(line);
+  } catch {
+    // Logging needs a file handle too; under ENFILE stderr is all that is left.
+    console.error(line);
+  }
 }
 
 async function brokerHealthy() {
@@ -108,6 +171,15 @@ export function cmdBroker(argv) {
   fs.mkdirSync(BROKER_DIR, { recursive: true });
   fs.writeFileSync(pidFile, String(process.pid));
 
+  // Stay up. A dead broker is invisible from the sandbox side — clipboard and
+  // host-open just stop — and nothing restarts it until the next `vivary`
+  // command (measured gaps: minutes to 30 hours). Per-request errors are
+  // caught in the handler; these catch what escapes from async plugin work.
+  // Continuing after an unknown error risks a leak; dying risked a day without
+  // the broker, which is the worse trade for a stateless request handler.
+  process.on('uncaughtException', (e) => brokerError('uncaught', e));
+  process.on('unhandledRejection', (e) => brokerError('unhandled rejection', e));
+
   const server = http.createServer((req, res) => {
     const respond = (code, body) => {
       res.writeHead(code, { 'content-type': 'application/json' });
@@ -128,13 +200,22 @@ export function cmdBroker(argv) {
       respond(404, { ok: false, error: 'no handler' });
     };
 
+    const safeDispatch = (params) => {
+      try {
+        dispatch(params);
+      } catch (e) {
+        brokerError(`request ${req.method} from ${req.socket.remoteAddress}`, e);
+        if (!res.headersSent) respond(503, { ok: false, error: e.code || 'internal error' });
+      }
+    };
+
     if (req.method === 'GET') {
-      return dispatch(new URL(req.url, 'http://localhost').searchParams);
+      return safeDispatch(new URL(req.url, 'http://localhost').searchParams);
     }
     if (req.method !== 'POST') return respond(405, { ok: false, error: 'POST only' });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 4 * 1024 * 1024) req.destroy(); });
-    req.on('end', () => dispatch(new URLSearchParams(body)));
+    req.on('end', () => safeDispatch(new URLSearchParams(body)));
   });
   server.listen(BROKER_PORT, '0.0.0.0', () => {
     console.log(`vivary broker listening on :${BROKER_PORT} (log: ${BROKER_DIR}/broker.log)`);
