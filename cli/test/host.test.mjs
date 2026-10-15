@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  checkMemoryBudget, displayName, formatBudgetRefusal, formatBytes, levelOf, openFilesWarning,
-  parseBudget, parseContainerLs, parseLsofF, parseMemory, requestedMemoryBytes, vmOwnerFromPath,
+  checkMemoryBudget, countBrokerEnfile, displayName, formatBudgetRefusal, formatBytes, levelOf,
+  openFilesWarning, parseBudget, parseContainerLs, parseLsofF, parseMemory, requestedMemoryBytes,
+  vmOwnerFromPath, vnodeLevel,
 } from '../core/host.mjs';
 import { diagnose, renderStats, vmRows } from '../core/stats.mjs';
 import { validateConfig } from '../core/config.mjs';
@@ -124,7 +125,7 @@ const host = {
   memBytes: 64 * GiB, ncpu: 16, loadavg: [1, 2, 3], memFreePct: 80,
   swap: { total: GiB, used: 0 },
   files: { num: 200000, max: 491520, perProc: 245760 },
-  vnodes: { num: 263168, max: 263168 }, procs: { num: 800, max: 16000 },
+  vnodes: { num: 263168, max: 263168, free: 148140 }, procs: { num: 800, max: 16000 },
 };
 const budget = { bytes: 32 * GiB, label: '50% of 64.0 GiB' };
 
@@ -169,4 +170,48 @@ test('renderStats prints the host tables, the VM table and the findings', () => 
   assert.match(out, /VM memory\s+8\.0 GiB configured of 32\.0 GiB budget/);
   assert.match(out, /smarta\s+container\s+8\.0 GiB\s+6\s+5\.0 GiB\s+2\.5\s+32,910\s+7%/);
   assert.match(out, /No problems found\./);
+});
+
+// --- vnodes: the Mac's real limit ---
+
+test('vnodeLevel: free handles, not the (always full) table', () => {
+  assert.equal(vnodeLevel({ num: 263168, max: 263168, free: 148140 }), 'ok');
+  assert.equal(vnodeLevel({ num: 263168, max: 263168, free: 60000 }), 'warning');
+  assert.equal(vnodeLevel({ num: 263168, max: 263168, free: 20000 }), 'critical');
+  assert.equal(vnodeLevel({ num: 0, max: 0, free: 0 }), 'ok');
+});
+
+test('countBrokerEnfile counts tagged lines inside the window only', () => {
+  const now = Date.parse('2026-10-15T12:00:00.000Z');
+  const log = [
+    '2026-10-15T11:00:00.000Z ENFILE request GET from 1.2.3.4: the Mac is out of file handles (x) — see vivary stats',
+    '2026-10-15T11:30:00.000Z OK clipboard read (text, 5B) by smarta',
+    '2026-10-14T13:00:00.000Z ENFILE uncaught: the Mac is out of file handles (y) — see vivary stats',
+    '2026-10-13T11:00:00.000Z ENFILE request GET from 1.2.3.4: old',
+    "Error: ENFILE: file table overflow, stat '/x'",
+  ].join('\n');
+  assert.equal(countBrokerEnfile(log, { now }), 2);
+  assert.equal(countBrokerEnfile('', { now }), 0);
+});
+
+test('openFilesWarning also fires on low free vnodes', () => {
+  const files = { num: 20000, max: 491520 };
+  assert.equal(openFilesWarning(files, { num: 263168, max: 263168, free: 148140 }), null);
+  assert.match(openFilesWarning(files, { num: 263168, max: 263168, free: 30000 }),
+    /only 30,000 of 263,168 file handles \(vnodes\) are free/);
+});
+
+test('diagnose: low vnodes is the first finding; broker ENFILE is reported', () => {
+  const f = diagnose({
+    host: { ...host, vnodes: { num: 263168, max: 263168, free: 10000 } },
+    rows: [], budget, committedBytes: 8 * GiB, brokerEnfile: 3,
+  });
+  assert.equal(f[0].level, 'critical');
+  assert.match(f[0].text, /only 10,000 of 263,168 file handles/);
+  assert.match(f.map((x) => x.text).join('\n'), /ran out of file handles 3x in the last 24 h/);
+});
+
+test('renderStats shows free handles', () => {
+  const out = renderStats({ host, rows: [], budget, committedBytes: 0, findings: [] });
+  assert.match(out, /Handles\s+148,140 free of 263,168 vnodes\s+56%/);
 });

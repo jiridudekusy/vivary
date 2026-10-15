@@ -2,10 +2,12 @@
 // and the kernel tables that have actually taken it down (open files).
 // `--trim` makes the guests drop their dentry/inode caches, which is what
 // releases the host files virtiofs holds for them (see host.mjs).
-import { capture, die, hasCmd, parseArgs } from './util.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { SANDBOXES_DIR, capture, die, hasCmd, parseArgs } from './util.mjs';
 import {
-  DEFAULT_MEMORY_BUDGET, checkMemoryBudget, displayName, formatBytes, hostSnapshot,
-  levelOf, parseBudget, runningVmMemory, vmProcesses,
+  DEFAULT_MEMORY_BUDGET, checkMemoryBudget, countBrokerEnfile, displayName, formatBytes,
+  hostSnapshot, levelOf, parseBudget, runningVmMemory, vmProcesses, vnodeLevel,
 } from './host.mjs';
 
 const n = (v) => (v == null ? '—' : Number(v).toLocaleString('en-US'));
@@ -29,9 +31,26 @@ export function vmRows(memory, procs) {
 }
 
 // Findings, worst first. Each carries the one thing to do about it.
-export function diagnose({ host, rows, budget, committedBytes }) {
+export function diagnose({ host, rows, budget, committedBytes, brokerEnfile = 0 }) {
   const out = [];
   const files = host.files;
+  const vl = vnodeLevel(host.vnodes);
+  if (vl !== 'ok') {
+    out.push({
+      level: vl,
+      text: `only ${n(host.vnodes.free)} of ${n(host.vnodes.max)} file handles (vnodes) are free. `
+        + 'At zero nothing on the Mac can open a file — the broker crashes first, then the Mac hangs.',
+      fix: 'vivary stats --trim',
+    });
+  }
+  if (brokerEnfile) {
+    out.push({
+      level: 'warning',
+      text: `the broker ran out of file handles ${brokerEnfile}x in the last 24 h (ENFILE in broker.log) — `
+        + 'the Mac hit the limit, even if it is fine right now.',
+      fix: 'vivary stats --trim',
+    });
+  }
   const fl = levelOf(files.num / files.max);
   if (fl !== 'ok') {
     out.push({
@@ -77,8 +96,8 @@ export function renderStats({ host, rows, budget, committedBytes, findings }) {
     + ` · ${host.memFreePct}% RAM free · swap ${gb(host.swap.used)} used`);
   L.push(`Open files  ${n(host.files.num).padStart(9)} / ${n(host.files.max)}  ${pct(host.files.num, host.files.max).padStart(4)}`
     + `   (per process: ${n(host.files.perProc)})`);
-  L.push(`Vnodes      ${n(host.vnodes.num).padStart(9)} / ${n(host.vnodes.max)}  ${pct(host.vnodes.num, host.vnodes.max).padStart(4)}`
-    + '   (a cache — full is normal; open files pin entries in it)');
+  L.push(`Handles     ${n(host.vnodes.free).padStart(9)} free of ${n(host.vnodes.max)} vnodes  ${pct(host.vnodes.free, host.vnodes.max).padStart(4)}`
+    + '   (the real limit: at 0 free nothing on the Mac can open a file)');
   L.push(`Processes   ${n(host.procs.num).padStart(9)} / ${n(host.procs.max)}  ${pct(host.procs.num, host.procs.max).padStart(4)}`);
   L.push(`VM memory   ${gb(committedBytes)} configured of ${gb(budget.bytes)} budget (${budget.label})`);
   L.push('');
@@ -127,6 +146,26 @@ function budgetSetting(loadGlobalBudget) {
   }
 }
 
+// The tail of broker.log is enough for 24 h of ENFILE tags; the whole file is
+// tens of MB.
+function brokerLogTail(bytes = 4 * 1024 * 1024) {
+  const file = path.join(SANDBOXES_DIR, '.broker', 'broker.log');
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const len = Math.min(size, bytes);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      return buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
 function collect(loadGlobalBudget) {
   const host = hostSnapshot();
   const memory = runningVmMemory();
@@ -134,7 +173,11 @@ function collect(loadGlobalBudget) {
   const budget = parseBudget(budgetSetting(loadGlobalBudget), host.memBytes);
   const { used: committedBytes } = checkMemoryBudget({ budgetBytes: budget.bytes, committed: memory });
   const rows = vmRows(memory, procs);
-  return { host, rows, budget, committedBytes, findings: diagnose({ host, rows, budget, committedBytes }) };
+  const brokerEnfile = countBrokerEnfile(brokerLogTail());
+  return {
+    host, rows, budget, committedBytes, brokerEnfile,
+    findings: diagnose({ host, rows, budget, committedBytes, brokerEnfile }),
+  };
 }
 
 // Drop the dentry/inode cache in every running vivary sandbox on Apple

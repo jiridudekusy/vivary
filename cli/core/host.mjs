@@ -133,6 +133,38 @@ export function parseLsofF(out) {
   return by;
 }
 
+// The real ceiling is the VNODE table, not kern.maxfiles: the broker died on
+// ENFILE from `stat`, which takes no file descriptor — only a vnode. macOS
+// keeps the table full as a cache (num_vnodes == maxvnodes is normal) and
+// recycles entries from its free list; a file held open — every file a
+// sandbox guest has cached, through virtiofs — cannot be recycled. When the
+// free list is empty, any lookup of an uncached path anywhere on the Mac fails
+// with ENFILE. So the number to watch is kern.free_vnodes. Measured with no VM
+// running: ~148k free of 263k. A native walk of 500k files on the Mac moved it
+// by 4k (the Mac recycles); one VM walking 85k files through the share took
+// 82k.
+export function vnodeLevel(vnodes) {
+  if (!vnodes.max) return 'ok';
+  const free = vnodes.free / vnodes.max;
+  if (free < 0.1) return 'critical';
+  if (free < 0.25) return 'warning';
+  return 'ok';
+}
+
+// Broker log lines tagged ENFILE in the last `hours` — each one a moment the
+// Mac had run out of vnodes (see brokerError). Reads only the tail: the log is
+// tens of MB.
+export function countBrokerEnfile(logText, { now = Date.now(), hours = 24 } = {}) {
+  const since = now - hours * 3600 * 1000;
+  let n = 0;
+  for (const line of logText.split('\n')) {
+    if (!/ ENFILE /.test(line)) continue;
+    const t = Date.parse(line.slice(0, 24));
+    if (Number.isFinite(t) && t >= since) n++;
+  }
+  return n;
+}
+
 // Thresholds for the diagnosis. Files are about the SYSTEM table: once it is
 // full nothing on the Mac can open a file, which is what preceded the reset.
 export function levelOf(ratio, warn = 0.5, crit = 0.75) {
@@ -152,7 +184,7 @@ function sysctlNumbers(keys) {
 export function hostSnapshot() {
   const s = sysctlNumbers([
     'kern.num_files', 'kern.maxfiles', 'kern.maxfilesperproc',
-    'kern.num_vnodes', 'kern.maxvnodes', 'kern.maxproc', 'kern.memorystatus_level',
+    'kern.num_vnodes', 'kern.maxvnodes', 'kern.free_vnodes', 'kern.maxproc', 'kern.memorystatus_level',
   ]);
   const swap = capture('sysctl', ['-n', 'vm.swapusage']).stdout;
   const sw = (k) => {
@@ -167,7 +199,7 @@ export function hostSnapshot() {
     memFreePct: s['kern.memorystatus_level'],
     swap: { total: sw('total'), used: sw('used') },
     files: { num: s['kern.num_files'], max: s['kern.maxfiles'], perProc: s['kern.maxfilesperproc'] },
-    vnodes: { num: s['kern.num_vnodes'], max: s['kern.maxvnodes'] },
+    vnodes: { num: s['kern.num_vnodes'], max: s['kern.maxvnodes'], free: s['kern.free_vnodes'] },
     procs: { num: procs, max: s['kern.maxproc'] },
   };
 }
@@ -247,11 +279,16 @@ export function formatBudgetRefusal({ name, runtime, mode, requestBytes, committ
 // Open files are warned about, not enforced: what a VM pins depends on what its
 // agent walks AFTER boot, so the count at start predicts little. Being told the
 // table is already half full before adding another VM is still worth a line.
-export function openFilesWarning(files) {
-  if (!files.max || files.num / files.max < 0.5) return null;
-  return `WARNING: the Mac's open-file table is ${Math.round((files.num / files.max) * 100)}% full `
-    + `(${files.num.toLocaleString('en-US')} / ${files.max.toLocaleString('en-US')}).\n`
+export function openFilesWarning(files, vnodes = null) {
+  const lowVnodes = vnodes && vnodeLevel(vnodes) !== 'ok';
+  const fullFiles = files.max && files.num / files.max >= 0.5;
+  if (!lowVnodes && !fullFiles) return null;
+  const what = lowVnodes
+    ? `only ${vnodes.free.toLocaleString('en-US')} of ${vnodes.max.toLocaleString('en-US')} file handles (vnodes) are free`
+    : `the Mac's open-file table is ${Math.round((files.num / files.max) * 100)}% full `
+      + `(${files.num.toLocaleString('en-US')} / ${files.max.toLocaleString('en-US')})`;
+  return `WARNING: ${what}.\n`
     + '    Sandbox VMs hold a host file for everything their guests cache; when the\n'
-    + '    table fills, nothing on the Mac can open a file and it can hang. Starting\n'
-    + '    anyway. See: vivary stats   Release: vivary stats --trim';
+    + '    handles run out, nothing on the Mac can open a file and it can hang.\n'
+    + '    Starting anyway. See: vivary stats   Release: vivary stats --trim';
 }
