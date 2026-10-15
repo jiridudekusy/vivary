@@ -1,16 +1,44 @@
 // node-modules: per-sandbox node_modules overlays — Linux modules never mix
 // with the host's macOS ones. Docker gets one bind mount per package dir (no
-// mount limit); Apple `container` tops out at ~120 virtiofs shares, so it
-// gets a single share plus in-VM bind mounts done by the bind-modules helper
-// (driven by a manifest; modules-watch extends it live for new package.json
-// files created inside the sandbox).
+// mount limit); Apple `container` gets in-VM bind mounts done by the
+// bind-modules helper (driven by a manifest; modules-watch extends it live for
+// new package.json files created inside the sandbox).
+//
+// On Apple `container` the overlays live on a per-sandbox VOLUME
+// (`vivary-<name>-modules`, an ext4 disk image), not on the Mac. They used to
+// sit in ~/.vivary/<name>/modules behind the virtiofs share, because a
+// container was thrown away on every exit before containers persisted. But
+// virtiofs keeps a host file open for every file the guest has cached, and
+// node_modules are the biggest trees there are: measured on an 85k-file tree,
+// the share pinned +82 671 host files, the volume +1 — and the volume wrote it
+// 65x faster and walked it cold 700x faster. A volume is separate from the
+// container, so it survives --recreate; `rm --purge` deletes it. The host
+// share stays mounted for the manifest (the host rewrites it every start) and
+// as the source of the one-time migration of what was stored there before.
 //
 // The dir set is either discovered (depth N below the workspace root) or given
 // explicitly as workspace-relative paths in .vivary.json.
 import fs from 'node:fs';
 import path from 'node:path';
-import { die } from '../../core/util.mjs';
+import { capture, die } from '../../core/util.mjs';
 import { sandboxDir } from '../../core/sandbox.mjs';
+
+// The store volume. Sparse: an empty 256G image costs ~34 MB on the Mac, and it
+// grows only with what is written (bind-modules fstrims it at every start, so
+// deleted modules are handed back). Volume names share the sandbox-name
+// alphabet ([a-z0-9-]).
+export const modulesVolume = (name) => `vivary-${name}-modules`;
+export const STORE_SIZE = '256G';
+export const STORE_MOUNT = '/vivary-modules-store';
+const usesStoreVolume = (cfg) => !!cfg.nodeModules && cfg.runtime === 'container';
+
+function ensureStoreVolume(name, run = capture) {
+  const vol = modulesVolume(name);
+  if (run('container', ['volume', 'inspect', vol]).status === 0) return vol;
+  const r = run('container', ['volume', 'create', '-s', STORE_SIZE, vol]);
+  if (r.status !== 0) die(`node-modules: cannot create volume ${vol}: ${(r.stderr || r.stdout).trim()}`);
+  return vol;
+}
 
 // Find workspace dirs containing package.json — candidates for an overlay.
 // No symlink following (a workspace symlink must not lead us to create dirs
@@ -138,16 +166,20 @@ export default {
     const manifest = [];
     for (const rel of pkgs) {
       const target = path.join(cfg.workspace, rel, 'node_modules');
-      const state = path.join(modulesRoot, moduleSlug(rel));
       fs.mkdirSync(target, { recursive: true });
-      fs.mkdirSync(state, { recursive: true });
-      if (cfg.runtime === 'docker') args.push('-v', `${state}:${target}`);
-      else manifest.push(`${moduleSlug(rel)}\t${target}`);
+      if (cfg.runtime === 'docker') {
+        const state = path.join(modulesRoot, moduleSlug(rel));
+        fs.mkdirSync(state, { recursive: true });
+        args.push('-v', `${state}:${target}`);
+      } else {
+        manifest.push(`${moduleSlug(rel)}\t${target}`);
+      }
     }
     if (cfg.runtime !== 'docker') {
       fs.writeFileSync(path.join(modulesRoot, '.manifest'), manifest.join('\n') + '\n');
       args.push(
         '-v', `${modulesRoot}:/vivary-modules`,
+        '-v', `${ensureStoreVolume(cfg.name)}:${STORE_MOUNT}`,
         '-e', 'SANDBOX_MODULES=1',
         '-e', `SANDBOX_MODULES_DEPTH=${depth}`,
         '-e', `SANDBOX_WORKSPACE=${cfg.workspace}`,
@@ -158,5 +190,49 @@ export default {
     }
     log(`==> node_modules overlays: ${pkgs.length} dir(s), ${explicit ? 'explicit list' : `depth ${depth}`}`);
     return args;
+  },
+
+  // The store volume is baked in at creation. A kept container from before the
+  // switch has no such key in its snapshot, so it is refused with the
+  // --recreate hint rather than restarted with node_modules still on the Mac.
+  containerSnapshot: (cfg) => (usesStoreVolume(cfg) ? { nodeModulesStore: 'volume' } : {}),
+
+  // Wait until bind-modules has put the overlays in place. Without this an
+  // agent exec'd right after start could run `npm install` into the Mac's own
+  // node_modules — the exact mix the overlays exist to prevent. The window is
+  // usually under a second, but the one-time migration off the host share can
+  // take minutes. bind-modules marks completion with the VM's boot_id, so a
+  // marker left by the previous boot of a kept container never counts.
+  async postUp({ cfg, cname }) {
+    if (!usesStoreVolume(cfg)) return;
+    const probe = 'grep -q vivary-modules.ready /usr/local/bin/bind-modules || exit 3; '
+      + '[ "$(cat /run/vivary-modules.ready 2>/dev/null)" = "$(cat /proc/sys/kernel/random/boot_id)" ]';
+    const started = Date.now();
+    let told = false;
+    for (;;) {
+      const { status } = capture('container', ['exec', cname, 'sh', '-c', probe], { timeout: 15000 });
+      if (status === 0 || status === 3) return; // ready, or an image without the marker
+      const waited = Date.now() - started;
+      if (!told && waited > 2000) {
+        console.log('==> node_modules: waiting for the overlays (the first start after the move\n'
+          + '    copies them off the Mac onto the sandbox volume — one-time, can take minutes)');
+        told = true;
+      }
+      if (waited > 30 * 60 * 1000) {
+        console.error(`WARNING: node_modules overlays not ready after 30 min — see: container logs ${cname}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  },
+
+  // Deleting the sandbox deletes its modules. Runs after the container is gone
+  // (a volume cannot be removed while attached); no volume is fine.
+  onPurge(name) {
+    const vol = modulesVolume(name);
+    if (capture('container', ['volume', 'inspect', vol]).status !== 0) return;
+    const r = capture('container', ['volume', 'rm', vol]);
+    if (r.status === 0) console.log(`==> node_modules volume ${vol} deleted.`);
+    else console.error(`WARNING: could not delete volume ${vol}: ${(r.stderr || r.stdout).trim()}`);
   },
 };

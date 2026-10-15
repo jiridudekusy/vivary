@@ -157,6 +157,12 @@ export function containerConfigSnapshot(cfg, flags = {}, plugins = getPlugins())
       const key = def.cfgKey || flag;
       snap[key] = cfg[key] ?? false;
     }
+    // Something a plugin bakes into the container that no flag reflects —
+    // e.g. node-modules moving its store onto a volume. A key the saved
+    // snapshot lacks is a change, so a kept container built before such a
+    // switch is refused (with the --recreate hint) instead of silently
+    // running the old layout.
+    Object.assign(snap, p.containerSnapshot?.(cfg) || {});
   }
   return snap;
 }

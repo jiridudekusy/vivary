@@ -295,7 +295,7 @@ export function enforceHostLimits(ctx) {
   if (process.platform !== 'darwin') return;
   const { cfg, flags } = ctx;
   const host = hostSnapshot();
-  const warning = openFilesWarning(host.files);
+  const warning = openFilesWarning(host.files, host.vnodes);
   if (warning) console.error(`==> ${warning}`);
   // docker sandboxes live inside Docker Desktop's fixed-size VM (counted for
   // the others' sake by runningVmMemory): starting one adds no VM of its own.
@@ -338,7 +338,9 @@ async function ensurePersistentContainer(rt, ctx, spec, { recreate = false } = {
     } else {
       const changes = diffContainerConfig(cfg.containerConfig, snapshot);
       if (changes.length) {
-        die(`sandbox '${cfg.name}' has a kept container built with different settings:\n`
+        // Thrown, not die()d: `resume` reports it and goes on to the next
+        // sandbox; a direct command still exits through main()'s catch.
+        throw new Error(`sandbox '${cfg.name}' has a kept container built with different settings:\n`
           + `${formatConfigChanges(changes)}\n`
           + '    A container bakes its env, mounts and caps at creation, so restarting it\n'
           + '    would silently ignore these. Rebuild it with:\n'

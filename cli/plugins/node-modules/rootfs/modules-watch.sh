@@ -35,7 +35,7 @@ handle_pkg() {
     [ "$(depth_of "$dir")" -le "$DEPTH" ] || return 0
     slug=$(printf '%s' "${rel:-root}" | sed 's#[^a-zA-Z0-9._-]#-#g')
     grep -q "^$slug	" /vivary-modules/.manifest 2>/dev/null && return 0
-    mkdir -p "/vivary-modules/$slug" "$dir/node_modules"
+    mkdir -p "$dir/node_modules"
     printf '%s\t%s\n' "$slug" "$dir/node_modules" >> /vivary-modules/.manifest
     sudo /usr/local/bin/bind-modules \
         || echo "WARNING: live overlay failed for $dir" >&2
