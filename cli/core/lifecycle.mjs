@@ -116,9 +116,42 @@ function stickyFlagNames() {
     .filter(([, def]) => def.sticky).map(([flag]) => flag);
 }
 
+// Which workspace's .vivary.json governs this invocation. A sandbox that
+// already exists uses ITS OWN workspace — never the current directory, which
+// may be $HOME (that is where `vivary resume` runs `up --name <each>`) or
+// another project entirely. Reading the project file from the cwd meant the
+// sandbox's own file was silently skipped — global defaults applied, its
+// approval gate never ran — or another project's file was loaded for it.
+// Measured: agent-sandbox's approved file says 4g/4 CPUs, yet it ran on the
+// global 8g/6. A --workspace that disagrees with the sandbox's own is an
+// error, not a choice: the mount would come from one, the config from the
+// other.
+export function configWorkspace({ cliWorkspace, cwd, existing }) {
+  if (existing) {
+    const own = path.resolve(existing.workspace);
+    if (cliWorkspace && path.resolve(cliWorkspace) !== own) {
+      throw new Error(`sandbox '${existing.name}' belongs to ${own}, not ${path.resolve(cliWorkspace)} `
+        + '(drop --workspace, or pick another --name)');
+    }
+    return own;
+  }
+  return path.resolve(cliWorkspace || cwd);
+}
+
+function sandboxWorkspace(cliFlags, explicitName) {
+  try {
+    return configWorkspace({
+      cliWorkspace: cliFlags.workspace, cwd: process.cwd(),
+      existing: explicitName ? loadSandbox(explicitName) : null,
+    });
+  } catch (e) {
+    return die(e.message);
+  }
+}
+
 async function prepare(argv, opts = {}) {
   const { flags: cliFlags, positionals, rest } = parseArgs(argv, flagSpec(), opts);
-  const workspace = path.resolve(cliFlags.workspace || process.cwd());
+  const workspace = sandboxWorkspace(cliFlags, cliFlags.name || positionals[0]);
 
   // Config files: project .vivary.json wins entirely over the global
   // defaults (~/.vivary/vivary.json) — the two never merge. Loading dies
@@ -651,7 +684,7 @@ export async function cmdCreate(argv) {
 // exists yet) and mark it approved. The intended creation path for the file.
 export async function cmdInit(argv) {
   const { flags, positionals } = parseArgs(argv, flagSpec());
-  const workspace = path.resolve(flags.workspace || process.cwd());
+  const workspace = sandboxWorkspace(flags, flags.name || positionals[0]);
   const file = path.join(workspace, PROJECT_CONFIG_NAME);
   if (fs.existsSync(file)) {
     die(`${file} already exists — edit it directly; the change is reviewed on the next start`);
@@ -667,11 +700,17 @@ export async function cmdInit(argv) {
     const v = cfg[def.cfgKey || flag];
     if (v) fileFlags[flag] = v; // only enabled features — the file stays minimal
   }
+  // Size the file the way a start resolves it today (CLI > sticky > global >
+  // built-in), so writing it does not quietly resize the sandbox: it used to
+  // put the built-in 4g/4 in, which then outranked the 8g/6 the sandbox ran
+  // with — and, the kept container having been created at 8g, made the next
+  // start refuse ("memory: 8g -> 4g").
+  const sized = resolveScalars(flags, null, cfg, loadGlobalConfig(pluginFlagDefs())?.config || {});
   const project = {
     agent: flags.agent || cfg.agent || 'claude',
     runtime: flags.runtime || cfg.runtime,
-    memory: flags.memory || process.env.SANDBOX_MEMORY || '4g',
-    cpus: flags.cpus || process.env.SANDBOX_CPUS || '4',
+    memory: sized.memory || process.env.SANDBOX_MEMORY || '4g',
+    cpus: sized.cpus || process.env.SANDBOX_CPUS || '4',
     flags: fileFlags,
     ...(fileFlags.egress ? { egress: { presets: [], allow: [] } } : {}),
   };

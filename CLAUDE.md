@@ -25,7 +25,14 @@ English, converse with the user in Czech.
   SECURITY: the file is agent-writable, so every content change is gated
   host-side — sha256 in sandbox.json (`configApproved`) + verbatim copy in
   `~/.vivary/<name>/vivary-approved.json`, unified diff + [y/N] on TTY,
-  loud death on non-TTY. Egress policy syncs to ASHP as allow rules named
+  loud death on non-TTY. The project file is read from the sandbox's OWN
+  workspace (`configWorkspace`), never the cwd: `vivary resume` runs
+  `up --name <each>` from wherever it was started, and reading the cwd silently
+  skipped each sandbox's file (no approval gate, global defaults — agent-sandbox
+  ran 8g/6 against an approved 4g/4) or loaded another project's file for it.
+  A --workspace that disagrees with an existing sandbox's dies. `vivary init`
+  writes the size a start would resolve today (CLI > sticky > global >
+  built-in), not the built-in 4g/4. Egress policy syncs to ASHP as allow rules named
   `vivary:<sandbox>:<pattern>` (hand-made UI rules never touched); presets
   in `cli/plugins/egress/presets.mjs` (anthropic/openai/cursor, harvested
   empirically; plus `uunpm`, auto-contributed by its plugin — see
