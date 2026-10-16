@@ -60,9 +60,16 @@ English, converse with the user in Czech.
   bind-modules at the first start). The plugin's `containerSnapshot` adds
   `nodeModulesStore: volume`, so a kept container from before is refused with
   the --recreate hint; `postUp` waits for bind-modules' boot_id marker
-  (/run/vivary-modules.ready) so no agent runs before the overlay. Docker
-  still binds host dirs per package (follow-up: docker volumes, needs a chown
-  of the root-owned volume dir). Flag types: `boolean|optional|string|list`; `list` is
+  (/run/vivary-modules.ready) so no agent runs before the overlay. Docker gets
+  one named volume per package dir (`vivary-<name>-nm-<slug>`, labelled
+  `vivary.sandbox=<name>`; purge deletes BY LABEL — a name prefix would also hit
+  a sandbox whose name starts the same). Docker creates an empty volume's root
+  as root:root (the mount point is in the workspace, never in the image), so
+  npm as agent got EACCES: NEW volumes are chowned to agent — and filled from
+  the old host dir, same safe-copy rules — by ONE throwaway container from the
+  sandbox image per batch; on failure the new volumes are removed so none is
+  left root-owned forever. Docker still has no live watcher: a package.json
+  added after the container was created gets its volume only on --recreate. Flag types: `boolean|optional|string|list`; `list` is
   repeatable and may carry a `short` alias, and `list: true` on another type
   lets that flag also take an array in `.vivary.json`.
   `vivary ide` (ssh plugin command) opens Cursor/VS Code via Remote-SSH.
@@ -452,7 +459,11 @@ English, converse with the user in Czech.
   refuse (by design). End to end with a scratch sandbox: up with
   --node-modules, npm install lands on the volume (findmnt FSTYPE ext4) and not
   on the Mac, survives down/up and --recreate, legacy dir migrates, a stripped
-  snapshot key is refused, rm --purge deletes the volume.
+  snapshot key is refused, rm --purge deletes the volume. Same run on docker
+  (`--runtime docker`, Docker Desktop up): volumes are ext4 inside Docker's VM
+  and agent-owned, the Docker VM process's Mac fds do not move while walking
+  them, migration strips setuid, and purge spares a decoy volume of another
+  sandbox with the same name prefix.
 - Clipboard tests: back up user clipboard first (pbpaste > file), restore
   after. Compare via `od -An -tx1` (no xxd in image).
 - Full smoke: sandbox up with all flags → check hooks (`pgrep sshd/Xvfb/...`),
