@@ -2,7 +2,7 @@
 // live start on Apple `container` (so it stays out of the generic snapshot).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import headed, { generateVncPassword, novncUrl } from '../plugins/headed/plugin.mjs';
+import headed, { accessLines, generateVncPassword, novncUrl } from '../plugins/headed/plugin.mjs';
 import { containerConfigSnapshot, diffContainerConfig } from '../core/sandbox.mjs';
 
 test('VNC passwords: 8 chars (VNC truncates there), no look-alike characters', () => {
@@ -15,11 +15,17 @@ test('VNC passwords: 8 chars (VNC truncates there), no look-alike characters', (
   assert.equal(generateVncPassword(() => n++ % 3), 'abcabcab');
 });
 
-test('noVNC URL: container DNS on Apple, localhost:<port> on docker, password included', () => {
-  assert.equal(novncUrl({ runtime: 'container', cname: 'claude-sandbox-findmy', domain: 'mac.local', password: 'ab cd' }),
-    'http://claude-sandbox-findmy.mac.local:6080/vnc.html?autoconnect=true&resize=scale&password=ab%20cd');
-  assert.equal(novncUrl({ runtime: 'docker', cname: 'x', domain: '', port: 6081, password: 'pw' }),
-    'http://localhost:6081/vnc.html?autoconnect=true&resize=scale&password=pw');
+test('noVNC URL: container DNS on Apple, localhost:<port> on docker — never the password', () => {
+  assert.equal(novncUrl({ runtime: 'container', cname: 'claude-sandbox-findmy', domain: 'mac.local', password: 'secret12' }),
+    'http://claude-sandbox-findmy.mac.local:6080/vnc.html?autoconnect=true&resize=scale');
+  assert.equal(novncUrl({ runtime: 'docker', cname: 'x', domain: '', port: 6081, password: 'secret12' }),
+    'http://localhost:6081/vnc.html?autoconnect=true&resize=scale');
+});
+
+test('the password is shown on a line of its own', () => {
+  assert.deepEqual(accessLines('http://localhost:6080/vnc.html', 'abcDEF34'),
+    ['http://localhost:6080/vnc.html', 'password: abcDEF34']);
+  assert.doesNotMatch(accessLines('http://localhost:6080/vnc.html', 'abcDEF34')[0], /abcDEF34/);
 });
 
 test('headed is sticky, and in the snapshot only where it is baked in (docker)', () => {

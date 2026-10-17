@@ -397,8 +397,11 @@ English, converse with the user in Czech.
   `-nopw` on 0.0.0.0, which another sandbox could open (verified: agent-sandbox
   reached findmy's VNC while that browser held an iCloud login). Now a
   per-sandbox password (~/.vivary/<name>/vnc-password, 8 chars — VNC's limit)
-  goes in via VIVARY_VNC_PASSWORD, x11vnc listens on localhost only, the URL is
-  printed with the password (`vivary headed <name>` repeats it). On Apple
+  goes in via VIVARY_VNC_PASSWORD, x11vnc listens on localhost only. The URL
+  and the password are printed on SEPARATE lines (`vivary headed <name>`
+  repeats them) and the password is never in the URL or on the clipboard: a
+  URL lands in synced browser history, and the Mac clipboard is synced into
+  every --clipboard sandbox — i.e. to other agents. noVNC prompts for it. On Apple
   `container` postUp starts the stack LIVE (`exec setsid -w start-gui`), so a
   kept container needs no --recreate (flag def `snapshot: false`); on docker
   the noVNC publish (stable `novncPort`, 127.0.0.1 — it was a fixed 6080 on

@@ -16,6 +16,11 @@
 // its own password, kept on the Mac (~/.vivary/<name>/vnc-password, 0600) and
 // passed in at start; x11vnc listens on localhost only, so the one way in is
 // noVNC with that password. VNC auth truncates passwords to 8 characters.
+// The password is printed on its own line and NEVER put in the URL: a URL
+// lands in browser history (synced to other devices) and, copied on the Mac,
+// in the clipboard — which the clipboard plugin syncs into every sandbox that
+// has it, handing the password to their agents. Not copied to the clipboard
+// for the same reason. noVNC asks for it when it connects.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -47,17 +52,22 @@ export function vncPassword(name) {
 // per-sandbox port on 127.0.0.1 — it used to be a fixed 6080 on every
 // interface, which put the browser on the LAN and made a second headed docker
 // sandbox fail with "port is already allocated".
-export function novncUrl({ runtime, cname, domain, port, password }) {
+export function novncUrl({ runtime, cname, domain, port }) {
   const base = runtime === 'container' && domain
     ? `http://${cname}.${domain}:6080`
     : `http://localhost:${port}`;
-  return `${base}/vnc.html?autoconnect=true&resize=scale&password=${encodeURIComponent(password)}`;
+  return `${base}/vnc.html?autoconnect=true&resize=scale`;
+}
+
+// What to show the user: the URL, and the password on a line of its own.
+export function accessLines(url, password) {
+  return [url, `password: ${password}`];
 }
 
 async function urlFor(cfg, cname) {
   const domain = cfg.runtime === 'container' ? containerDnsDomain() : '';
   const port = domain ? null : await assignStablePort(cfg, { key: 'novncPort', base: 6080, preferred: 6080 });
-  return { url: novncUrl({ runtime: cfg.runtime, cname, domain, port, password: vncPassword(cfg.name) }), port };
+  return { url: novncUrl({ runtime: cfg.runtime, cname, domain, port }), port };
 }
 
 async function cmdHeaded(argv) {
@@ -66,7 +76,7 @@ async function cmdHeaded(argv) {
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
   if (!cfg.headed) die(`'${name}' is not headed — start it with: vivary up ${name} --headed`);
   const { url } = await urlFor(cfg, containerName(name));
-  console.log(url);
+  for (const line of accessLines(url, vncPassword(name))) console.log(line);
 }
 
 export default {
@@ -80,7 +90,7 @@ export default {
       // Not in the generic snapshot: on Apple `container` postUp starts the
       // GUI live. containerSnapshot below adds it back where it IS baked in.
       snapshot: false,
-      help: 'GUI stack in the sandbox (sticky): the agent\'s browser is\nvisible and drivable via noVNC, password-protected.\nURL is printed on start; again with: vivary headed <name>',
+      help: 'GUI stack in the sandbox (sticky): the agent\'s browser is\nvisible and drivable via noVNC, password-protected.\nURL and password are printed on start (the password never\nin the URL); again with: vivary headed <name>',
     },
   },
   containerSnapshot: (cfg) => (cfg.runtime === 'docker' ? { headed: !!cfg.headed } : {}),
@@ -108,6 +118,7 @@ export default {
       return;
     }
     const { url } = await urlFor(cfg, cname);
-    ctx.log(`==> Headed: watch and drive the browser at\n    ${url}`);
+    const [link, pw] = accessLines(url, vncPassword(cfg.name));
+    ctx.log(`==> Headed: watch and drive the browser at\n    ${link}\n    ${pw}  (noVNC asks for it; again with: vivary headed ${cfg.name})`);
   },
 };
