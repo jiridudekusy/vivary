@@ -44,17 +44,30 @@ function flagSpec() {
 // file always wins. `~/.vivary/vivary.json` is a fallback for sandboxes that
 // said nothing; it has no business resizing one that was explicitly given
 // `--memory 20g`. A project .vivary.json still wins — committed, deliberate,
-// per-project intent. `agent` skips the sticky tier: it is resolved from
-// sandbox.json by cmdStart already.
+// per-project intent. The same holds for `agent`: it used to skip the sticky
+// tier on the theory that cmdStart falls back to sandbox.json — but the
+// global default filled the slot first, so a sandbox created with
+// `--agent=codex` started claude (findmy, 2026-10-17).
 export function resolveScalars(cliFlags = {}, projectConfig, cfg = {}, effective = {}) {
   const flags = { ...cliFlags };
   for (const key of ['agent', 'memory', 'cpus']) {
     if (flags[key] !== undefined) continue;
     if (projectConfig?.[key] !== undefined) flags[key] = projectConfig[key];
-    else if (key !== 'agent' && cfg[key] !== undefined) flags[key] = cfg[key];
+    else if (cfg[key] !== undefined) flags[key] = cfg[key];
     else if (effective[key] !== undefined) flags[key] = effective[key];
   }
   return flags;
+}
+
+// The runtime a start uses: CLI > project .vivary.json > the sandbox's own.
+// The global default is NOT a tier here — it seeds a NEW sandbox (createSandbox
+// / cmdCreate), and applying it on every start overrode the choice made at
+// creation: findmy, created with --runtime=docker, came up on Apple
+// `container`, and since sandbox.json is saved during a start the override
+// even became permanent. A CLI --runtime is sticky (persisted by the caller);
+// a project file's applies to the invocation only, as before.
+export function startRuntime(cliFlags = {}, projectConfig, cfg = {}) {
+  return cliFlags.runtime || projectConfig?.runtime || cfg.runtime;
 }
 
 function makeCtx(cfg, flags, mode, rt) {
@@ -180,9 +193,12 @@ async function prepare(argv, opts = {}) {
   // File values override sticky sandbox.json values for this invocation
   // (in-memory; effective.flags already has CLI flags overlaid on top).
   overlayConfigFlags(cfg, effective.flags, cliFlags);
-  if (effective.runtime && effective.runtime !== cfg.runtime) {
-    cfg.runtime = effective.runtime;
+  const runtime = startRuntime(cliFlags, project?.config, cfg);
+  if (cliFlags.runtime && cliFlags.runtime !== cfg.runtime) {
+    cfg.runtime = cliFlags.runtime;
+    saveSandbox(cfg);
   }
+  cfg.runtime = runtime;
   // Egress policy (presets/allow) rides along for the egress plugin —
   // non-enumerable so no saveSandbox() call can leak it into sandbox.json.
   Object.defineProperty(cfg, 'egressPolicy', {

@@ -4,7 +4,7 @@
 // REFUSING to start ("memory: 20g -> 8g"), not as a quiet downgrade.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveScalars } from '../core/lifecycle.mjs';
+import { resolveScalars, startRuntime } from '../core/lifecycle.mjs';
 
 test('a CLI flag wins over everything', () => {
   const f = resolveScalars({ memory: '20g' }, { memory: '6g' }, { memory: '12g' }, { memory: '8g' });
@@ -36,9 +36,18 @@ test('nothing anywhere leaves it undefined for buildRunSpec to default', () => {
   assert.equal(resolveScalars({}, undefined, {}, {}).memory, undefined);
 });
 
-test('agent skips the sticky tier (cmdStart reads it from sandbox.json)', () => {
+test("the sandbox's own agent beats the global default", () => {
+  // findmy: created with --agent=codex, global file says claude
   const f = resolveScalars({}, undefined, { agent: 'codex' }, { agent: 'claude' });
-  assert.equal(f.agent, 'claude');
+  assert.equal(f.agent, 'codex');
+  assert.equal(resolveScalars({ agent: 'cursor' }, undefined, { agent: 'codex' }, {}).agent, 'cursor');
+  assert.equal(resolveScalars({}, { agent: 'claude' }, { agent: 'codex' }, {}).agent, 'claude');
+});
+
+test("runtime: CLI > project file > the sandbox's own; the global default is not a tier", () => {
+  assert.equal(startRuntime({}, undefined, { runtime: 'docker' }), 'docker');
+  assert.equal(startRuntime({}, { runtime: 'container' }, { runtime: 'docker' }), 'container');
+  assert.equal(startRuntime({ runtime: 'tart' }, { runtime: 'container' }, { runtime: 'docker' }), 'tart');
 });
 
 test('memory and cpus resolve independently', () => {
