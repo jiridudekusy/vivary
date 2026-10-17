@@ -82,6 +82,14 @@ RUN npm install -g playwright \
 RUN apt-get update && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/*
 
+# dtach: `vivary exec` runs a command in a detachable session — type a
+# password at its prompt, Ctrl-\ to detach, and the service keeps running
+# (`vivary attach` returns to it). dtach rather than tmux: it keeps no
+# scrollback, so nothing the program printed, a password it echoed included,
+# is retained anywhere but in the program itself.
+RUN apt-get update && apt-get install -y --no-install-recommends dtach \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY rootfs/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY rootfs/fix-net.sh /usr/local/bin/fix-net
 COPY rootfs/profile.d-sandbox.sh /etc/profile.d/sandbox.sh

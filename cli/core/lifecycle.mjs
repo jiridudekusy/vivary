@@ -1,7 +1,7 @@
 // Sandbox lifecycle commands: start/up/down/shell/ls/rm/create.
 import fs from 'node:fs';
 import path from 'node:path';
-import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, die, parseArgs, sanitizeName } from './util.mjs';
+import { HOME, IMAGE, IS_TTY, SANDBOXES_DIR, ask, capture, die, parseArgs, sanitizeName } from './util.mjs';
 import { termEnvArgs, termEnvVars } from './runtime.mjs';
 import { resolveRuntime, runtimeKind, runtimesRunning } from './runtimes/index.mjs';
 import { buildRunSpec, sandboxMemory } from './runtimes/spec.mjs';
@@ -500,6 +500,107 @@ export async function cmdUp(argv) {
   }
   console.log(`==> Sandbox '${cfg.name}' is up (runtime: ${cfg.runtime})`);
   console.log(`    Stop with: vivary down ${cfg.name}`);
+}
+
+// --- vivary exec / attach -----------------------------------------------------
+//
+// Run any command in a sandbox. On a terminal it runs in a DETACHABLE session
+// (dtach): type what the program asks for — a password that must not be
+// written anywhere — then Ctrl-\ detaches and the program keeps running;
+// `vivary attach` returns to it. The password only ever travels through the
+// session's terminal: not argv, not env, no shell history (the program is
+// exec'd directly, not through an interactive bash whose HISTFILE lives on the
+// Mac), no scrollback (dtach keeps none, unlike tmux), and the runtimes do
+// not log exec stdin. Without a terminal it runs attached through pipes and
+// the exit code passes through.
+const SESSION_DIR = '/tmp/vivary-sessions';
+const sessionSocket = (name) => `${SESSION_DIR}/${name}.sock`;
+
+// Session name: --session, else the program — the script, not its
+// interpreter (`python3 svc.py` is "svc", not "python3") — made socket-safe.
+const INTERPRETERS = new Set(['python', 'python3', 'node', 'bash', 'sh', 'zsh', 'ruby', 'perl', 'deno', 'bun', 'npx', 'uv', 'uvx', 'java']);
+export function sessionName(explicit, command = []) {
+  const words = [].concat(command).map(String);
+  const prog = words.find((w, i) => !w.startsWith('-') && (i === words.length - 1 || !INTERPRETERS.has(path.basename(w))))
+    || words[0] || '';
+  const base = explicit || path.basename(prog).replace(/\.(py|js|mjs|ts|sh|rb|pl)$/, '') || 'session';
+  return base.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|-+$/g, '') || 'session';
+}
+
+// --session is exec's own option; take it out before the sandbox flags are
+// parsed (only up to `--` — after it, everything belongs to the program).
+export function takeSessionOption(argv) {
+  const out = [];
+  let session;
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok === '--') { out.push(...argv.slice(i)); break; }
+    if (tok === '--session') { session = argv[++i]; continue; }
+    if (tok.startsWith('--session=')) { session = tok.slice('--session='.length); continue; }
+    out.push(tok);
+  }
+  return { session, argv: out };
+}
+
+function sessionAlive(runtime, cname, name) {
+  return capture(runtime, ['exec', cname, 'test', '-S', sessionSocket(name)]).status === 0;
+}
+
+export async function cmdExec(argv) {
+  // Our own messages go to stderr: on a pipe, stdout belongs to the program.
+  if (!IS_TTY) console.log = (...a) => console.error(...a);
+  const { session, argv: rest0 } = takeSessionOption(argv);
+  const { cfg, flags, rest } = await prepare(rest0);
+  if (!rest.length) die('nothing to run — usage: vivary exec <sandbox> [--session <name>] -- <command> [args...]');
+  if (runtimeKind(cfg.runtime) === 'vm-tart') die('vivary exec does not support tart sandboxes yet');
+  const rt = resolveRuntime(cfg.runtime);
+  const ctx = makeCtx(cfg, flags, 'exec', rt);
+  let started = false;
+  if (!rt.isRunning(cfg.name)) ({ started } = await ensureUpContainer(ctx, rt, { recreate: !!flags.recreate }));
+  const env = { ...termEnvVars(), ...(await brokerEnvVars(cfg)) };
+
+  let code;
+  let alive = false;
+  if (IS_TTY) {
+    const name = sessionName(session, rest);
+    capture(cfg.runtime, ['exec', ctx.cname, 'mkdir', '-p', SESSION_DIR]);
+    if (sessionAlive(cfg.runtime, ctx.cname, name)) {
+      console.error(`==> '${name}' is already running in '${cfg.name}' — attaching to it (the command is not run again).`);
+    } else {
+      console.error(`==> '${name}' in '${cfg.name}': Ctrl-\\ detaches and leaves it running.`);
+    }
+    code = rt.exec(ctx.cname, ['dtach', '-A', sessionSocket(name), '-r', 'winch', '-z', ...rest], { interactive: true, env });
+    alive = sessionAlive(cfg.runtime, ctx.cname, name);
+    if (alive) {
+      console.error(`==> '${name}' keeps running in '${cfg.name}'. Back to it: vivary attach ${cfg.name}${name === sessionName(undefined, rest) ? '' : ` ${name}`}`);
+    }
+  } else {
+    code = rt.exec(ctx.cname, rest, { stdin: true, env });
+  }
+  // A container this call started goes back to sleep — unless something now
+  // lives in it (a detached session), or it is an `up` sandbox.
+  if (started && !alive && !cfg.desiredRunning) rt.stop(ctx.cname);
+  process.exit(code);
+}
+
+export function cmdAttach(argv) {
+  const { flags, positionals } = parseArgs(argv, { name: 'string' });
+  const name = flags.name || positionals[0] || sanitizeName(path.basename(process.cwd()));
+  const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
+  if (!IS_TTY) die('vivary attach needs a terminal');
+  const rt = resolveRuntime(cfg.runtime);
+  if (!rt.isRunning(name)) die(`'${name}' is not running — nothing to attach to`);
+  const cname = rt.instanceName(name);
+  const ls = capture(cfg.runtime, ['exec', cname, 'sh', '-c', `ls ${SESSION_DIR} 2>/dev/null`]);
+  const sessions = ls.stdout.split('\n').filter((f) => f.endsWith('.sock')).map((f) => f.slice(0, -5));
+  if (!sessions.length) die(`no sessions running in '${name}' — start one with: vivary exec ${name} -- <command>`);
+  const want = positionals[1];
+  if (!want && sessions.length > 1) die(`sessions in '${name}': ${sessions.join(', ')} — pick one: vivary attach ${name} <session>`);
+  const session = want || sessions[0];
+  if (!sessions.includes(session)) die(`no session '${session}' in '${name}' (running: ${sessions.join(', ')})`);
+  console.error(`==> '${session}' in '${name}': Ctrl-\\ detaches and leaves it running.`);
+  process.exit(rt.exec(cname, ['dtach', '-a', sessionSocket(session), '-r', 'winch', '-z'],
+    { interactive: true, env: termEnvVars() }));
 }
 
 export function cmdDown(argv) {

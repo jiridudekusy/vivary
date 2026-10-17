@@ -36,6 +36,9 @@ vivary down [name]          stop the long-running container
 vivary ls                   list sandboxes across both runtimes
 vivary stats [--trim]       how hard the VMs press on the Mac (RAM, CPU, open
                          files); --trim releases the host files they pin
+vivary exec [name] -- cmd   run any command in the sandbox; on a terminal in a
+                         detachable session (type a password, Ctrl-\ detaches)
+vivary attach [name]        back into a session started by exec
 vivary shell [name]         bash in the sandbox (auto-starts it if not running)
 vivary rm [name] [--purge]  remove container (--purge deletes state too)
 vivary build [base|agents]  build images

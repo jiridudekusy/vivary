@@ -22,6 +22,9 @@ export VIVARY_CMD="${1:-}"
 # server and the headed GUI failed on about one restart in five. Nothing can
 # be serving a display this early in a boot, so every such lock is stale.
 rm -f /tmp/.X[0-9]*-lock /tmp/.X11-unix/X[0-9]* 2>/dev/null || true
+# Same for `vivary exec` session sockets: a boot has no sessions yet, and a
+# socket left by the previous one would make `vivary attach` offer a dead one.
+rm -f /tmp/vivary-sessions/*.sock 2>/dev/null || true
 for hook in /etc/entrypoint.d/*.sh; do
     [ -f "$hook" ] || continue
     bash "$hook" || echo "WARNING: entrypoint hook $(basename "$hook") failed" >&2

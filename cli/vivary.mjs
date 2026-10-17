@@ -13,7 +13,7 @@ import { loadPlugins, agentRegistry, pluginCommands, pluginFlagDefs, pluginHelp 
 import { cmdBroker } from './core/broker.mjs';
 import { cmdBuild } from './core/build.mjs';
 import {
-  cmdCreate, cmdDown, cmdInit, cmdList, cmdResume, cmdRm, cmdShell, cmdStart, cmdUp,
+  cmdAttach, cmdCreate, cmdDown, cmdExec, cmdInit, cmdList, cmdResume, cmdRm, cmdShell, cmdStart, cmdUp,
 } from './core/lifecycle.mjs';
 import { cmdStats } from './core/stats.mjs';
 import { loadMemoryBudget } from './core/config.mjs';
@@ -67,6 +67,15 @@ Commands:
                        Exits 2 when something is critical.
   shell [name]         Bash in the sandbox (attaches if running, otherwise
                        starts a container; auto-creates like start).
+  exec [name] [--session <s>] -- <command> [args...]
+                       Run any command in the sandbox (starting it if needed).
+                       On a terminal it runs in a detachable session: answer
+                       its prompts (e.g. a password — never written anywhere),
+                       Ctrl-\ detaches and it keeps running. Without a
+                       terminal it runs through pipes and returns its exit code.
+  attach [name] [session]
+                       Back into a session started by exec (Ctrl-\ again to
+                       detach; quit the program to end it).
   rm [name] [--purge]  Remove the container (--purge also deletes state).
   build [--pull]       Build the container image (core + all plugins).
                        --pull re-resolves the ubuntu base, so apt/Node/JDK
@@ -120,6 +129,9 @@ host Claude Code and vice versa. See README for details.`;
 }
 
 async function main() {
+  // Docker Desktop's CLI appends "What's next: Try Docker Debug…" adverts to
+  // interactive execs — noise in the middle of vivary's own output.
+  process.env.DOCKER_CLI_HINTS ??= 'false';
   migrateLegacyHome();
   await loadPlugins();
   const { launchers } = agentRegistry();
@@ -171,6 +183,12 @@ async function main() {
       break;
     case 'shell':
       await cmdShell(rest);
+      break;
+    case 'exec':
+      await cmdExec(rest);
+      break;
+    case 'attach':
+      cmdAttach(rest);
       break;
     case 'rm':
       await cmdRm(rest);

@@ -424,6 +424,29 @@ English, converse with the user in Czech.
   not start -> match by process name (`pgrep -x`); start-gui must wait for the
   display whoever started it (boot hooks race a live start) and for noVNC
   before returning; a wedged passwordless x11vnc ignored SIGTERM -> SIGKILL.
+- `vivary exec <sb> [--session s] -- <cmd>` / `vivary attach <sb> [s]`: any
+  command in a sandbox (started if needed). On a TTY it runs under `dtach`
+  (core image, late layer): answer its prompt — a password that must not be
+  stored — Ctrl-\ detaches, it keeps running, and the container stays up while
+  the session lives (otherwise exec puts a container it started back to sleep,
+  like start/shell). dtach, not tmux: no scrollback, nothing retained. The
+  program is exec'd directly (no interactive bash -> no HISTFILE, which lives
+  on the Mac). Verified with a canary typed through a pty: absent from the whole
+  container fs (binaries too), every process's environ/cmdline, the container
+  log, vivary state/logs and shell histories; present only in the service's
+  memory. Without a TTY: `exec -i` (pipe, no tty) and vivary's own messages go
+  to stderr — stdout is the program's. Session = --session or the script name
+  (`python3 svc.py` -> svc). Sockets live in /tmp/vivary-sessions and are
+  removed by entrypoint.sh at boot (a restart ends the service; type the
+  password again). A service in another docker container reaches a sandbox
+  port published on 127.0.0.1 via `host.docker.internal:<port>` (measured);
+  other containers on the default bridge can ALSO reach it directly at its
+  172.17.0.x IP — publishing to loopback does not isolate from them. Same-uid
+  processes can read the service's memory (no Yama in the guest kernel), so a
+  secret-holding service belongs in a sandbox with no agent. TEST TRAPS: a
+  Ctrl-\ sent before dtach owns the terminal is a SIGQUIT to vivary itself
+  (the session survives); and searching /proc for a canary with the canary in
+  your own grep's argv finds your grep — pass it on stdin.
 - STALE X LOCKS in kept containers: /tmp lives on the rootfs and survives
   stop/start (a normal boot clears it). Xvfb treats /tmp/.X99-lock as live when
   its PID exists, and after a restart that PID is reused (lock said 49, PID 49
