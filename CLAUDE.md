@@ -89,8 +89,11 @@ English, converse with the user in Czech.
   ssh_config: per-sandbox Host blocks live in `~/.vivary/ssh/config` (marker
   blocks, `SANDBOXES_DIR`-relative), pulled in by ONE prepended managed
   `Include` in `~/.ssh/config`; pre-include in-place blocks are migrated on the
-  next `up`, and the new `onRemove(name)` plugin hook (every `rm`, runs AFTER
-  `onPurge` which still needs the block's HostName) drops them again. First
+  next `up`, and the new `onRemove(name, cfg)` plugin hook (every `rm`, runs
+  AFTER `onPurge(name, cfg)` which still needs the block's HostName) drops them
+  again. Both get the sandbox config loaded BEFORE the rm: with --purge the
+  state dir is gone by then, and a hook that re-read sandbox.json got nothing
+  (the tailnet shares of purged sandboxes stayed up). First
   touch of `~/.ssh/config` backs it up to `~/.ssh/config.vivary.bak` (once).
   known_hosts removal is ATTRIBUTED via the block (HostName+Port ->
   `knownHostsTarget`), which is the only way to spot docker's
@@ -401,7 +404,16 @@ English, converse with the user in Czech.
   and the password are printed on SEPARATE lines (`vivary headed <name>`
   repeats them) and the password is never in the URL or on the clipboard: a
   URL lands in synced browser history, and the Mac clipboard is synced into
-  every --clipboard sandbox — i.e. to other agents. noVNC prompts for it. On Apple
+  every --clipboard sandbox — i.e. to other agents. noVNC prompts for it.
+  With --tailscale it is ALSO shared on the tailnet like Paseo: `tailscale
+  serve --https=<tsNovncPort>` -> 127.0.0.1:<novncPort> (HTTPS with the
+  tailnet's cert, wss works through serve; verified by reading the RFB greeting
+  over wss on both runtimes). serve cannot target the container network — the
+  macOS extension refuses "remote destinations from non-default route" — so
+  Apple `container` then needs the loopback publish too, which makes headed
+  part of its snapshot there. Tailnet ports skip what `tailscale serve`
+  already uses (`tailnetServePorts`; hostPortFree cannot see them — that is how
+  a sandbox once shadowed the user's own Paseo share); Paseo uses it too. On Apple
   `container` postUp starts the stack LIVE (`exec setsid -w start-gui`), so a
   kept container needs no --recreate (flag def `snapshot: false`); on docker
   the noVNC publish (stable `novncPort`, 127.0.0.1 — it was a fixed 6080 on

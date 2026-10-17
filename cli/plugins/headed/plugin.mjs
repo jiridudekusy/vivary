@@ -7,8 +7,9 @@
 //
 // The stack can be started LIVE with `start-gui` (it is idempotent), so on
 // Apple `container` a kept container gets it from postUp without --recreate.
-// On docker the noVNC port publish is baked in at creation, so there `headed`
-// is part of the container snapshot and switching it asks for --recreate.
+// Where noVNC is published to host loopback (docker; Apple with --tailscale,
+// see tailnetUrl) that publish is baked in at creation, so there `headed` is
+// part of the container snapshot and switching it asks for --recreate.
 //
 // SECURITY: the VNC server used to run without a password, reachable by every
 // other sandbox on the same network — verified, agent-sandbox could open
@@ -27,6 +28,8 @@ import path from 'node:path';
 import { capture, die, parseArgs } from '../../core/util.mjs';
 import { containerDnsDomain, containerName } from '../../core/runtime.mjs';
 import { assignStablePort, loadSandbox, resolveName, sandboxDir } from '../../core/sandbox.mjs';
+import { tailnetPortFree, tailscaleBin } from '../tailscale/plugin.mjs';
+import { selfTailnetFqdn } from '../web/server.mjs';
 
 const PW_ALPHABET = 'abcdefghjkmnpqrstuvwxyzACDEFHJKLMNPQRTUVWXY3479'; // no 0/O, 1/l/I, 2/Z, 5/S, 6/G, 8/B
 const PW_LENGTH = 8; // VNC's own limit
@@ -59,15 +62,41 @@ export function novncUrl({ runtime, cname, domain, port }) {
   return `${base}/vnc.html?autoconnect=true&resize=scale`;
 }
 
-// What to show the user: the URL, and the password on a line of its own.
-export function accessLines(url, password) {
-  return [url, `password: ${password}`];
+// With --tailscale the GUI must be reachable from the user's other devices
+// too (iPhone, iPad), so noVNC is shared on the tailnet the way Paseo is:
+// `tailscale serve --https=<tsNovncPort>` -> 127.0.0.1:<novncPort>, HTTPS with
+// the tailnet's certificate, tailnet-only, still behind the VNC password.
+// serve cannot reach the container network itself — the macOS extension
+// refuses "remote destinations from non-default route" (measured: HTTP 000) —
+// so it needs a loopback publish, which Apple `container` gets only then.
+export const tailnetUrl = (fqdn, tsPort) => `https://${fqdn}:${tsPort}/vnc.html?autoconnect=true&resize=scale`;
+const needsPublish = (cfg) => cfg.runtime === 'docker' || (cfg.runtime === 'container' && !!cfg.tailscale);
+
+// What to show the user: each URL, then the password on a line of its own.
+export function accessLines(urls, password) {
+  return [...[].concat(urls), `password: ${password}`];
 }
 
 async function urlFor(cfg, cname) {
   const domain = cfg.runtime === 'container' ? containerDnsDomain() : '';
-  const port = domain ? null : await assignStablePort(cfg, { key: 'novncPort', base: 6080, preferred: 6080 });
-  return { url: novncUrl({ runtime: cfg.runtime, cname, domain, port }), port };
+  const port = needsPublish(cfg) ? await assignStablePort(cfg, { key: 'novncPort', base: 6080, preferred: 6080 }) : null;
+  return { url: novncUrl({ runtime: cfg.runtime, cname, domain: domain || '', port }), port };
+}
+
+async function tailnetFor(cfg) {
+  if (!cfg.tailscale) return null;
+  const fqdn = selfTailnetFqdn();
+  if (!fqdn) return null;
+  const tsPort = await assignStablePort(cfg, { key: 'tsNovncPort', base: 8700, isFree: tailnetPortFree() });
+  return { fqdn, tsPort, url: tailnetUrl(fqdn, tsPort) };
+}
+
+// Drop this sandbox's tailnet share. A stale rule would point a tailnet HTTPS
+// port at a dead loopback port, and the next sandbox given that port would
+// inherit the URL.
+function unshare(cfg) {
+  const bin = tailscaleBin();
+  if (bin && cfg?.tsNovncPort) capture(bin, ['serve', `--https=${cfg.tsNovncPort}`, 'off']);
 }
 
 async function cmdHeaded(argv) {
@@ -76,7 +105,8 @@ async function cmdHeaded(argv) {
   const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
   if (!cfg.headed) die(`'${name}' is not headed — start it with: vivary up ${name} --headed`);
   const { url } = await urlFor(cfg, containerName(name));
-  for (const line of accessLines(url, vncPassword(name))) console.log(line);
+  const ts = await tailnetFor(cfg);
+  for (const line of accessLines(ts ? [url, ts.url] : [url], vncPassword(name))) console.log(line);
 }
 
 export default {
@@ -93,7 +123,10 @@ export default {
       help: 'GUI stack in the sandbox (sticky): the agent\'s browser is\nvisible and drivable via noVNC, password-protected.\nURL and password are printed on start (the password never\nin the URL); again with: vivary headed <name>',
     },
   },
-  containerSnapshot: (cfg) => (cfg.runtime === 'docker' ? { headed: !!cfg.headed } : {}),
+  // The noVNC publish is baked in at creation wherever there is one: always on
+  // docker, and on Apple `container` with --tailscale (serve needs it). There,
+  // switching headed asks for --recreate; elsewhere postUp starts it live.
+  containerSnapshot: (cfg) => (needsPublish(cfg) ? { headed: !!cfg.headed } : {}),
   async runArgs(ctx) {
     const { cfg, cname } = ctx;
     if (!cfg.headed) return [];
@@ -110,6 +143,7 @@ export default {
   // session, and the call returns once start-gui has it running.
   async postUp(ctx) {
     const { cfg, cname } = ctx;
+    if (!cfg.headed || !cfg.tailscale) unshare(cfg);
     if (!cfg.headed || !['container', 'docker'].includes(cfg.runtime)) return;
     const r = capture(cfg.runtime, ['exec', '-e', `VIVARY_VNC_PASSWORD=${vncPassword(cfg.name)}`,
       cname, 'setsid', '-w', 'start-gui'], { timeout: 60000 });
@@ -117,8 +151,30 @@ export default {
       console.error(`WARNING: headed: GUI did not start: ${(r.stderr || r.stdout).trim()}`);
       return;
     }
-    const { url } = await urlFor(cfg, cname);
-    const [link, pw] = accessLines(url, vncPassword(cfg.name));
-    ctx.log(`==> Headed: watch and drive the browser at\n    ${link}\n    ${pw}  (noVNC asks for it; again with: vivary headed ${cfg.name})`);
+    const { url, port } = await urlFor(cfg, cname);
+    const urls = [url];
+    if (cfg.tailscale) {
+      const ts = await tailnetFor(cfg);
+      const bin = tailscaleBin();
+      if (!ts || !bin) {
+        console.error('WARNING: headed: tailscale is not reporting this host — the GUI is reachable from this Mac only.');
+      } else if (!port) {
+        // a kept Apple container created before --tailscale: no loopback publish to share
+        console.error(`WARNING: headed: not shared on the tailnet — rebuild once with: vivary up ${cfg.name} --recreate`);
+      } else {
+        const r = capture(bin, ['serve', '--bg', `--https=${ts.tsPort}`, `http://127.0.0.1:${port}`]);
+        if (r.status === 0) urls.push(ts.url);
+        else console.error(`WARNING: headed: could not share on the tailnet: ${(r.stderr || r.stdout).trim()}`);
+      }
+    }
+    const lines = accessLines(urls, vncPassword(cfg.name));
+    const pw = lines.pop();
+    ctx.log(`==> Headed: watch and drive the browser at\n${lines.map((l) => `    ${l}`).join('\n')}\n`
+      + `    ${pw}  (noVNC asks for it; again with: vivary headed ${cfg.name})`);
+  },
+
+  // Every rm: the share must not outlive the container (see unshare).
+  onRemove(name, cfg) {
+    unshare(cfg || loadSandbox(name));
   },
 };

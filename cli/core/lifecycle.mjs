@@ -647,8 +647,11 @@ export async function cmdRm(argv) {
         if (rt.purge?.(cname).status === 0) console.log(`==> macOS VM '${cname}' deleted.`);
       }
       fs.rmSync(sandboxDir(name), { recursive: true, force: true });
+      // The state dir is already gone, so hooks get the config loaded before
+      // the rm started — reading sandbox.json here returned nothing, and the
+      // tailnet shares of a purged sandbox (paseo, headed) were never undone.
       for (const p of getPlugins()) {
-        if (p.onPurge) await p.onPurge(name);
+        if (p.onPurge) await p.onPurge(name, cfg);
       }
       console.log('==> Sandbox state purged.');
     }
@@ -658,7 +661,7 @@ export async function cmdRm(argv) {
   // Host-side pointers at the (now gone) instance — ssh_config alias etc. Runs
   // on EVERY rm, and after onPurge, which may still need to read them.
   for (const p of getPlugins()) {
-    if (p.onRemove) await p.onRemove(name);
+    if (p.onRemove) await p.onRemove(name, cfg);
   }
 }
 

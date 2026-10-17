@@ -62,7 +62,7 @@ export function listSandboxNames() {
 // sandbox.json keys holding a host port vivary published for a sandbox. Every
 // assignment checks all of them across all sandboxes, so two features (plain
 // sshd publish, tailnet-facing sshd publish) can never hand out the same port.
-const PORT_KEYS = ['sshPort', 'tsSshPort', 'paseoPort', 'tsPaseoPort', 'novncPort'];
+const PORT_KEYS = ['sshPort', 'tsSshPort', 'paseoPort', 'tsPaseoPort', 'novncPort', 'tsNovncPort'];
 
 // Stable per-sandbox host port, persisted in sandbox.json so ~/.ssh/config and
 // known_hosts stay valid across restarts. `preferred` is taken when nothing

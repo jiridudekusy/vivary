@@ -20,7 +20,7 @@ import { capture, die, parseArgs, resolveNpmVersion, sanitizeName } from '../../
 import {
   assignStablePort, loadSandbox, sandboxDir, saveSandbox,
 } from '../../core/sandbox.mjs';
-import { tailscaleBin, tailscaleStatus } from '../tailscale/plugin.mjs';
+import { tailnetPortFree, tailscaleBin, tailscaleStatus } from '../tailscale/plugin.mjs';
 import { makeReadablePassword } from './password.mjs';
 
 const PKG = '@getpaseo/cli';
@@ -110,7 +110,7 @@ export default {
     if (!cfg.paseo) return [];
 
     const port = await assignStablePort(cfg, { key: 'paseoPort', base: 6800 });
-    const tsPort = await assignStablePort(cfg, { key: 'tsPaseoPort', base: 8400 });
+    const tsPort = await assignStablePort(cfg, { key: 'tsPaseoPort', base: 8400, isFree: tailnetPortFree() });
     ensurePassword(dir, log);
 
     const stateDir = path.join(dir, 'dot-paseo');
@@ -169,8 +169,8 @@ export default {
   // Every `rm`, not just --purge: a stale serve rule would point a tailnet HTTPS
   // port at a dead loopback port, and the next sandbox to be given that port
   // would silently inherit the URL.
-  onRemove(name) {
-    const cfg = loadSandbox(name);
+  onRemove(name, removed) {
+    const cfg = removed || loadSandbox(name);
     if (!cfg?.tsPaseoPort) return;
     const bin = tailscaleBin();
     if (!bin) return;
