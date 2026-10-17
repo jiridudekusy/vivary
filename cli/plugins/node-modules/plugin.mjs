@@ -12,7 +12,7 @@
 // node_modules are the biggest trees there are: measured on an 85k-file tree,
 // the share pinned +82 671 host files, the volume +1 — and the volume wrote it
 // 65x faster and walked it cold 700x faster. A volume is separate from the
-// container, so it survives --recreate; `rm --purge` deletes it. The host
+// container, so it survives --recreate; `vivary rm` deletes it. The host
 // share stays mounted for the manifest (the host rewrites it every start) and
 // as the source of the one-time migration of what was stored there before.
 //
@@ -290,9 +290,14 @@ export default {
     }
   },
 
-  // Deleting the sandbox deletes its modules. Runs after the container is gone
-  // (a volume cannot be removed while attached); no volume is fine.
-  onPurge(name) {
+  // The volumes go with the container: every `vivary rm`, not only --purge.
+  // They hold what was installed INTO that container, so a removed container's
+  // modules are dead weight — and a runtime switch (Apple -> docker, which is
+  // an rm and a fresh up) left the old runtime's volume behind for good.
+  // --recreate is not an rm (it replaces the container in place), so the
+  // modules survive it, which is what the volume is for. Runs after the
+  // container is gone (a volume cannot be removed while attached).
+  onRemove(name) {
     const vol = modulesVolume(name);
     if (hasCmd('container') && capture('container', ['volume', 'inspect', vol]).status === 0) {
       const r = capture('container', ['volume', 'rm', vol]);

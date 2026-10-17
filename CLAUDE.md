@@ -67,7 +67,8 @@ English, converse with the user in Czech.
   watcher off). On Apple `container` the overlays live on a per-sandbox
   VOLUME `vivary-<name>-modules` (256G sparse ext4, mounted at
   /vivary-modules-store), NOT on the Mac: survives `--recreate`, deleted by
-  `rm --purge` (onPurge). The host share ~/.vivary/<name>/modules now carries
+  every `vivary rm` (onRemove) — it holds what was installed into that
+  container, and a runtime switch (rm + fresh up) otherwise left it behind. The host share ~/.vivary/<name>/modules now carries
   only the manifest (+ legacy data, migrated once onto the volume by
   bind-modules at the first start). The plugin's `containerSnapshot` adds
   `nodeModulesStore: volume`, so a kept container from before is refused with
