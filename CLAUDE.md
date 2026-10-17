@@ -32,7 +32,12 @@ English, converse with the user in Czech.
   ran 8g/6 against an approved 4g/4) or loaded another project's file for it.
   A --workspace that disagrees with an existing sandbox's dies. `vivary init`
   writes the size a start would resolve today (CLI > sticky > global >
-  built-in), not the built-in 4g/4. Egress policy syncs to ASHP as allow rules named
+  built-in), not the built-in 4g/4. `runtime` and `agent` follow CLI > project
+  file > the sandbox's own; the global file only SEEDS a new sandbox — applied
+  on every start it overrode the creation choice (findmy: `create
+  --runtime=docker --agent=codex` came up on Apple `container` and would have
+  started claude; the override then got saved). A CLI --runtime is sticky.
+  Egress policy syncs to ASHP as allow rules named
   `vivary:<sandbox>:<pattern>` (hand-made UI rules never touched); presets
   in `cli/plugins/egress/presets.mjs` (anthropic/openai/cursor, harvested
   empirically; plus `uunpm`, auto-contributed by its plugin — see
@@ -386,6 +391,29 @@ English, converse with the user in Czech.
   CAP_SYS_ADMIN (bind-modules runs it once per boot; node-modules sandboxes
   have caps ALL). A volume can be attached to ONE container at a time ("The
   storage device attachment is invalid").
+- headed (noVNC): STICKY, and password-protected — it used to be
+  per-invocation (so `create --headed` was forgotten) and served VNC with
+  `-nopw` on 0.0.0.0, which another sandbox could open (verified: agent-sandbox
+  reached findmy's VNC while that browser held an iCloud login). Now a
+  per-sandbox password (~/.vivary/<name>/vnc-password, 8 chars — VNC's limit)
+  goes in via VIVARY_VNC_PASSWORD, x11vnc listens on localhost only, the URL is
+  printed with the password (`vivary headed <name>` repeats it). On Apple
+  `container` postUp starts the stack LIVE (`exec setsid -w start-gui`), so a
+  kept container needs no --recreate (flag def `snapshot: false`); on docker
+  the noVNC publish (stable `novncPort`, 127.0.0.1 — it was a fixed 6080 on
+  every interface) is baked, so there `headed` IS in the snapshot. Traps found:
+  x11vnc started via `container exec` lives in another IPC namespace than a
+  boot-time Xvfb -> MIT-SHM "BadAccess ... X_ShmAttach" -> needs `-noshm`;
+  `pgrep -f openbox` matched any shell mentioning it, so the stack silently did
+  not start -> match by process name (`pgrep -x`); start-gui must wait for the
+  display whoever started it (boot hooks race a live start) and for noVNC
+  before returning; a wedged passwordless x11vnc ignored SIGTERM -> SIGKILL.
+- STALE X LOCKS in kept containers: /tmp lives on the rootfs and survives
+  stop/start (a normal boot clears it). Xvfb treats /tmp/.X99-lock as live when
+  its PID exists, and after a restart that PID is reused (lock said 49, PID 49
+  was clipboard-sync) -> Xvfb exits "already active": the clipboard's X server
+  and the headed GUI failed ~1 restart in 5. entrypoint.sh removes X locks
+  before any hook runs; 12/12 restarts clean after.
 - PID 1 must REAP: the payload command (`sleep infinity` for `up`, agent/bash
   for `start`/`shell`) never calls wait(), but entrypoint hooks leave daemons
   (sshd, Xvfb, clipboard-sync) that reparent to PID 1 — so every orphan that

@@ -62,7 +62,7 @@ export function listSandboxNames() {
 // sandbox.json keys holding a host port vivary published for a sandbox. Every
 // assignment checks all of them across all sandboxes, so two features (plain
 // sshd publish, tailnet-facing sshd publish) can never hand out the same port.
-const PORT_KEYS = ['sshPort', 'tsSshPort', 'paseoPort', 'tsPaseoPort'];
+const PORT_KEYS = ['sshPort', 'tsSshPort', 'paseoPort', 'tsPaseoPort', 'novncPort'];
 
 // Stable per-sandbox host port, persisted in sandbox.json so ~/.ssh/config and
 // known_hosts stay valid across restarts. `preferred` is taken when nothing
@@ -153,7 +153,9 @@ export function containerConfigSnapshot(cfg, flags = {}, plugins = getPlugins())
   };
   for (const p of plugins) {
     for (const [flag, def] of Object.entries(p.flags || {})) {
-      if (!def.sticky) continue;
+      // snapshot:false — a sticky flag the plugin can apply to a running
+      // container itself (it re-adds the key via containerSnapshot where not).
+      if (!def.sticky || def.snapshot === false) continue;
       const key = def.cfgKey || flag;
       snap[key] = cfg[key] ?? false;
     }
