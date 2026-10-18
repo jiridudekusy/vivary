@@ -447,11 +447,15 @@ English, converse with the user in Czech.
   `-nopw` on 0.0.0.0, which another sandbox could open (verified: agent-sandbox
   reached findmy's VNC while that browser held an iCloud login). Now a
   per-sandbox password (~/.vivary/<name>/vnc-password, 8 chars — VNC's limit)
-  goes in via VIVARY_VNC_PASSWORD, x11vnc listens on localhost only. The URL
-  and the password are printed on SEPARATE lines (`vivary headed <name>`
-  repeats them) and the password is never in the URL or on the clipboard: a
-  URL lands in synced browser history, and the Mac clipboard is synced into
-  every --clipboard sandbox — i.e. to other agents. noVNC prompts for it.
+  goes in via VIVARY_VNC_PASSWORD, x11vnc listens on localhost only. vivary
+  NEVER PRINTS A PASSWORD (user's rule, 2026-10-18) — only the file holding it
+  (`password: in ~/.vivary/<name>/vnc-password`; `vivary paseo` likewise names
+  dot-paseo/.vivary-password): its output lands in scrollback and in the
+  transcripts of agents that run vivary commands. Never in the URL or on the
+  clipboard either: a URL lands in synced browser history, and the Mac
+  clipboard is synced into every --clipboard sandbox — i.e. to other agents.
+  noVNC prompts for it. (The sandbox's own agent can read it from PID 1's
+  environment; harmless — it drives that browser anyway.)
   With --tailscale it is ALSO shared on the tailnet like Paseo: `tailscale
   serve --https=<tsNovncPort>` -> 127.0.0.1:<novncPort> (HTTPS with the
   tailnet's cert, wss works through serve; verified by reading the RFB greeting

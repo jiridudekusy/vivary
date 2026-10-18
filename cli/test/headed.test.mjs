@@ -2,6 +2,8 @@
 // live start on Apple `container` (so it stays out of the generic snapshot).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
 import headed, { accessLines, generateVncPassword, novncUrl, tailnetUrl } from '../plugins/headed/plugin.mjs';
 import { parseServePorts, tailnetPortFree } from '../plugins/tailscale/plugin.mjs';
 import { containerConfigSnapshot, diffContainerConfig } from '../core/sandbox.mjs';
@@ -23,10 +25,11 @@ test('noVNC URL: container DNS on Apple, localhost:<port> on docker — never th
     'http://localhost:6081/vnc.html?autoconnect=true&resize=scale');
 });
 
-test('the password is shown on a line of its own, after every URL', () => {
-  assert.deepEqual(accessLines('http://localhost:6080/vnc.html', 'abcDEF34'),
-    ['http://localhost:6080/vnc.html', 'password: abcDEF34']);
-  assert.deepEqual(accessLines(['http://a', 'https://b'], 'pw'), ['http://a', 'https://b', 'password: pw']);
+test('only the password FILE is shown, on a line of its own after every URL', () => {
+  const file = path.join(os.homedir(), '.vivary', 'findmy', 'vnc-password');
+  assert.deepEqual(accessLines('http://localhost:6080/vnc.html', file),
+    ['http://localhost:6080/vnc.html', 'password: in ~/.vivary/findmy/vnc-password']);
+  assert.deepEqual(accessLines(['http://a', 'https://b'], '/x/pw'), ['http://a', 'https://b', 'password: in /x/pw']);
 });
 
 test('tailnet URL: HTTPS on the host FQDN and the share port, no password', () => {

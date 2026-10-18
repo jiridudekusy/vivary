@@ -17,15 +17,17 @@
 // its own password, kept on the Mac (~/.vivary/<name>/vnc-password, 0600) and
 // passed in at start; x11vnc listens on localhost only, so the one way in is
 // noVNC with that password. VNC auth truncates passwords to 8 characters.
-// The password is printed on its own line and NEVER put in the URL: a URL
-// lands in browser history (synced to other devices) and, copied on the Mac,
-// in the clipboard — which the clipboard plugin syncs into every sandbox that
-// has it, handing the password to their agents. Not copied to the clipboard
-// for the same reason. noVNC asks for it when it connects.
+// vivary never PRINTS the password, only the file it is in: its output ends up
+// in terminal scrollback and in the transcripts of agents that run vivary
+// commands. Never in the URL either: a URL lands in browser history (synced to
+// other devices) and, copied on the Mac, in the clipboard — which the clipboard
+// plugin syncs into every sandbox that has it, handing the password to their
+// agents. Not copied to the clipboard for the same reason. noVNC asks for it
+// when it connects.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { capture, die, parseArgs } from '../../core/util.mjs';
+import { capture, die, parseArgs, tildify } from '../../core/util.mjs';
 import { containerDnsDomain, containerName } from '../../core/runtime.mjs';
 import { assignStablePort, loadSandbox, resolveName, sandboxDir } from '../../core/sandbox.mjs';
 import { effectiveSandbox } from '../../core/effective.mjs';
@@ -41,8 +43,10 @@ export function generateVncPassword(randomInt = crypto.randomInt) {
   return pw;
 }
 
+export const vncPasswordFile = (name) => path.join(sandboxDir(name), 'vnc-password');
+
 export function vncPassword(name) {
-  const file = path.join(sandboxDir(name), 'vnc-password');
+  const file = vncPasswordFile(name);
   if (!fs.existsSync(file)) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, `${generateVncPassword()}\n`, { mode: 0o600 });
@@ -73,9 +77,10 @@ export function novncUrl({ runtime, cname, domain, port }) {
 export const tailnetUrl = (fqdn, tsPort) => `https://${fqdn}:${tsPort}/vnc.html?autoconnect=true&resize=scale`;
 const needsPublish = (cfg) => cfg.runtime === 'docker' || (cfg.runtime === 'container' && !!cfg.tailscale);
 
-// What to show the user: each URL, then the password on a line of its own.
-export function accessLines(urls, password) {
-  return [...[].concat(urls), `password: ${password}`];
+// What to show the user: each URL, then where the password is — never the
+// password itself.
+export function accessLines(urls, passwordFile) {
+  return [...[].concat(urls), `password: in ${tildify(passwordFile)}`];
 }
 
 async function urlFor(cfg, cname) {
@@ -108,7 +113,8 @@ async function cmdHeaded(argv) {
   if (!cfg.headed) die(`'${name}' is not headed — start it with: vivary up ${name} --headed`);
   const { url } = await urlFor(cfg, containerName(name));
   const ts = await tailnetFor(cfg);
-  for (const line of accessLines(ts ? [url, ts.url] : [url], vncPassword(name))) console.log(line);
+  vncPassword(name); // make sure the file exists
+  for (const line of accessLines(ts ? [url, ts.url] : [url], vncPasswordFile(name))) console.log(line);
 }
 
 export default {
@@ -122,7 +128,7 @@ export default {
       // Not in the generic snapshot: on Apple `container` postUp starts the
       // GUI live. containerSnapshot below adds it back where it IS baked in.
       snapshot: false,
-      help: 'GUI stack in the sandbox (sticky): the agent\'s browser is\nvisible and drivable via noVNC, password-protected.\nURL and password are printed on start (the password never\nin the URL); again with: vivary headed <name>',
+      help: 'GUI stack in the sandbox (sticky): the agent\'s browser is\nvisible and drivable via noVNC, password-protected.\nThe URL is printed on start, the password never — only\nthe file it is in; again with: vivary headed <name>',
     },
   },
   // The noVNC publish is baked in at creation wherever there is one: always on
@@ -169,7 +175,7 @@ export default {
         else console.error(`WARNING: headed: could not share on the tailnet: ${(r.stderr || r.stdout).trim()}`);
       }
     }
-    const lines = accessLines(urls, vncPassword(cfg.name));
+    const lines = accessLines(urls, vncPasswordFile(cfg.name));
     const pw = lines.pop();
     ctx.log(`==> Headed: watch and drive the browser at\n${lines.map((l) => `    ${l}`).join('\n')}\n`
       + `    ${pw}  (noVNC asks for it; again with: vivary headed ${cfg.name})`);

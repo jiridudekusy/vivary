@@ -16,7 +16,7 @@
 // terminates TLS with a certificate it issues and renews itself.
 import fs from 'node:fs';
 import path from 'node:path';
-import { capture, die, parseArgs, resolveNpmVersion, sanitizeName } from '../../core/util.mjs';
+import { capture, die, parseArgs, resolveNpmVersion, sanitizeName, tildify } from '../../core/util.mjs';
 import {
   assignStablePort, loadSandbox, sandboxDir, saveSandbox,
 } from '../../core/sandbox.mjs';
@@ -28,14 +28,18 @@ const PKG = '@getpaseo/cli';
 
 // The daemon's own password, generated once per sandbox. Kept in the sandbox
 // state dir (not in the container's -e env, which `container inspect` would
-// show) and mounted in, so the entrypoint hook reads it from a file.
+// show) and mounted in, so the entrypoint hook reads it from a file. vivary
+// only ever names that file — never prints the password (scrollback, agent
+// transcripts).
+export const passwordFile = (dir) => path.join(dir, 'dot-paseo/.vivary-password');
+
 export function ensurePassword(dir, log = () => {}) {
-  const file = path.join(dir, 'dot-paseo/.vivary-password');
+  const file = passwordFile(dir);
   if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8').trim();
   const pw = makeReadablePassword();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${pw}\n`, { mode: 0o600 });
-  log(`==> paseo: generated a daemon password (see: vivary paseo <sandbox>)`);
+  log(`==> paseo: generated a daemon password (in ${tildify(file)})`);
   return pw;
 }
 
@@ -59,12 +63,11 @@ export function cmdPaseo(argv = []) {
     die(`sandbox '${name}' does not run Paseo. Turn it on with: vivary up --paseo`);
   }
   const url = serveUrl(cfg, selfTailnetFqdn());
-  const file = path.join(sandboxDir(name), 'dot-paseo/.vivary-password');
-  const pw = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : null;
+  const file = passwordFile(sandboxDir(name));
 
   console.log(`  Sandbox:   ${name}`);
   console.log(`  URL:       ${url || '(tailscale is not reporting this host — is it running?)'}`);
-  console.log(`  Password:  ${pw || '(not generated yet — start the sandbox once)'}`);
+  console.log(`  Password:  ${fs.existsSync(file) ? `in ${tildify(file)}` : '(not generated yet — start the sandbox once)'}`);
   console.log('');
   console.log('  In the Paseo app: add a direct daemon connection with that URL and password.');
   console.log('  Both devices must be signed in to the same tailnet.');
@@ -165,7 +168,7 @@ export default {
       console.error(`    The daemon still runs, reachable only from this Mac on 127.0.0.1:${cfg.paseoPort}.`);
       return;
     }
-    log(`    Paseo:     ${serveUrl(cfg, fqdn)}  (password: vivary paseo ${cfg.name})`);
+    log(`    Paseo:     ${serveUrl(cfg, fqdn)}  (password in ${tildify(passwordFile(sandboxDir(cfg.name)))})`);
   },
 
   // Every `rm`, not just --purge: a stale serve rule would point a tailnet HTTPS
