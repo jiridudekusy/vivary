@@ -90,9 +90,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends tini \
 RUN apt-get update && apt-get install -y --no-install-recommends dtach \
     && rm -rf /var/lib/apt/lists/*
 
-# ping, telnet: quick network checks from inside a sandbox (is the VPN host
-# up, does that port answer). Late layer, same reason as tini.
-RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping telnet \
+# ping, telnet, dig/nslookup/host: quick network checks from inside a sandbox
+# (is the VPN host up, does that port answer, what does the name resolve to).
+# Late layer, same reason as tini.
+RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping telnet bind9-dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY rootfs/entrypoint.sh /usr/local/bin/entrypoint.sh
