@@ -66,3 +66,23 @@ test('a rotated token stops working at once', () => {
   assert.equal(sandboxByToken('tok-b', { now: 40_001 }), null);
   assert.equal(sandboxByToken('tok-b2', { now: 46_000 }).name, 'b');
 });
+
+test('a token file that cannot be read is logged, not passed off as a bad token', () => {
+  resetTokenCache();
+  mkSandbox('c', 'tok-c');
+  assert.equal(sandboxByToken('tok-c', { now: 50_000 }).name, 'c');
+  const orig = fs.readFileSync;
+  fs.readFileSync = (p, ...a) => {
+    if (String(p).endsWith(path.join('c', 'broker-token'))) {
+      throw Object.assign(new Error('file table overflow'), { code: 'ENFILE' });
+    }
+    return orig(p, ...a);
+  };
+  try {
+    assert.equal(sandboxByToken('tok-c', { now: 50_001 }), null);
+  } finally {
+    fs.readFileSync = orig;
+  }
+  const log = fs.readFileSync(path.join(root, '.broker', 'broker.log'), 'utf8');
+  assert.match(log, / ENFILE token read for 'c': the Mac is out of file handles/);
+});

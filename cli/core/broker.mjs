@@ -34,10 +34,16 @@ const tokenMatches = (have, want) => {
   return a.length === want.length && crypto.timingSafeEqual(a, want);
 };
 
+// A missing token file is an ordinary miss. Any other failure is logged: when
+// the Mac runs out of file handles this read is what fails, and swallowing it
+// turned ENFILE into "DENIED bad token" — on 2026-10-18 two running sandboxes
+// were denied at the same instant 36 s before a watchdog reset, and the log had
+// no ENFILE line to say why.
 function readToken(name) {
   try {
     return fs.readFileSync(path.join(sandboxDir(name), 'broker-token'), 'utf8').trim();
-  } catch {
+  } catch (e) {
+    if (e?.code !== 'ENOENT') brokerError(`token read for '${name}'`, e);
     return null;
   }
 }
