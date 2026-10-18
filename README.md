@@ -34,6 +34,9 @@ vivary init [name]          write <workspace>/.vivary.json (committable project
 vivary up [name]            long-running container with sshd (Claude Desktop, IDEs)
 vivary down [name]          stop the long-running container
 vivary ls                   list sandboxes across both runtimes
+vivary config [name]        the sandbox's settings and where each one comes from
+vivary profile [ls|show p]  named profiles (~/.vivary/profiles/<p>.json) and
+                         the sandboxes using them
 vivary stats [--trim]       how hard the VMs press on the Mac (RAM, CPU, open
                          files); --trim releases the host files they pin
 vivary exec [name] -- cmd   run any command in the sandbox; on a terminal in a
@@ -80,10 +83,38 @@ configuration — create it with `vivary init`:
 }
 ```
 
-Precedence: CLI flags > `.vivary.json` > `~/.vivary/vivary.json` (global
-defaults, used **only** when no project file exists — the two never merge) >
-built-ins. CLI flags that extend the file are written back (union only —
-nothing is ever removed). Unknown keys fail loudly.
+Precedence, highest first: CLI flags > `.vivary.json` > what was set on the
+sandbox itself (sticky CLI flags) > its **profiles** (the last listed wins) >
+`~/.vivary/vivary.json` (global defaults, used **only** when no project file
+exists) > built-ins. Lists (`publish`, `volume`) from profiles and the
+defaults add to the list instead of replacing it; `dockerd` merges key by key.
+Turn an inherited flag off on one sandbox with `--<flag>=off`. CLI flags that
+extend the file are written back (union only — nothing is ever removed).
+Unknown keys fail loudly. `vivary config <name>` prints every setting with the
+layer it came from.
+
+`"dockerd"` is the daemon.json of the Docker inside a `--docker` sandbox —
+`insecure-registries`, `registry-mirrors`, `dns`, … (`hosts` is refused: it
+would put the Docker API on the network). It is applied on every start, no
+`--recreate`: keys dockerd reloads live are reloaded, others restart it (which
+stops the containers running inside — vivary says so).
+
+### Profiles
+
+A profile is `~/.vivary/profiles/<name>.json` with the same keys as
+`.vivary.json` (except `profiles`): agent, runtime, memory, cpus, flags,
+egress, dockerd. Give a sandbox one or more with `--profile a --profile b`
+(sticky; `--profile none` clears), or list them in `.vivary.json` as
+`"profiles": [...]`. A profile edit reaches every sandbox using it on its next
+start (a change baked into the container, like memory, asks for `--recreate`).
+agent and runtime come from a profile only when the sandbox is created —
+after that they are the sandbox's own. Profiles live on the Mac, out of the
+agent's reach, so they need no approval.
+
+```json
+{ "memory": "12g", "flags": { "docker": true, "headed": true },
+  "dockerd": { "insecure-registries": ["registry.local:5000"] } }
+```
 
 Because the agent inside the sandbox can edit the file, every content change
 must be approved: `start`/`up`/`shell` show a diff against the last approved

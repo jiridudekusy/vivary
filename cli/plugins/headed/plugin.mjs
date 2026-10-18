@@ -28,6 +28,7 @@ import path from 'node:path';
 import { capture, die, parseArgs } from '../../core/util.mjs';
 import { containerDnsDomain, containerName } from '../../core/runtime.mjs';
 import { assignStablePort, loadSandbox, resolveName, sandboxDir } from '../../core/sandbox.mjs';
+import { effectiveSandbox } from '../../core/effective.mjs';
 import { tailnetPortFree, tailscaleBin } from '../tailscale/plugin.mjs';
 import { selfTailnetFqdn } from '../web/server.mjs';
 
@@ -102,7 +103,8 @@ function unshare(cfg) {
 async function cmdHeaded(argv) {
   const { flags, positionals } = parseArgs(argv, { name: 'string' });
   const name = resolveName(flags.name || positionals[0], process.cwd());
-  const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
+  // Resolved like a start (the flag may come from a profile or .vivary.json).
+  const cfg = effectiveSandbox(name) || die(`sandbox '${name}' does not exist`);
   if (!cfg.headed) die(`'${name}' is not headed — start it with: vivary up ${name} --headed`);
   const { url } = await urlFor(cfg, containerName(name));
   const ts = await tailnetFor(cfg);

@@ -2,8 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  computeWriteBack, configHash, parseConfig, resolveEffectiveConfig,
-  unifiedDiff, validateConfig,
+  computeWriteBack, configHash, parseConfig, unifiedDiff, validateConfig,
 } from '../core/config.mjs';
 
 // Entries are either a bare type string (as before) or a full plugin flag def —
@@ -78,50 +77,33 @@ test('parseConfig reports invalid JSON with the file name', () => {
     /\/ws\/\.vivary\.json: invalid JSON/);
 });
 
-// --- resolveEffectiveConfig -----------------------------------------------------
+// --- dockerd / profiles / scopes ------------------------------------------------
 
-test('precedence: CLI flags > project file', () => {
-  const eff = resolveEffectiveConfig({
-    cliFlags: { memory: '16g', sudo: true },
-    project: { memory: '8g', cpus: '6', flags: { egress: true, sudo: false } },
-  });
-  assert.equal(eff.memory, '16g');
-  assert.equal(eff.cpus, '6');
-  assert.deepEqual(eff.flags, { egress: true, sudo: true });
+test('validateConfig accepts dockerd (daemon.json) in project, global and profile files', () => {
+  const dockerd = { 'insecure-registries': ['registry.local:5000'], 'registry-mirrors': ['https://m'] };
+  for (const scope of ['project', 'global', 'profile']) {
+    assert.doesNotThrow(() => validateConfig({ dockerd }, { scope, knownFlags: KNOWN_FLAGS }));
+  }
 });
 
-test('precedence: project file completely replaces global defaults (no merging)', () => {
-  const eff = resolveEffectiveConfig({
-    project: { memory: '8g' },
-    global: { memory: '32g', cpus: '10', agent: 'codex', flags: { sudo: true } },
-  });
-  assert.equal(eff.memory, '8g');
-  assert.equal(eff.cpus, undefined); // NOT 10 — global layer is fully replaced
-  assert.equal(eff.agent, undefined);
-  assert.deepEqual(eff.flags, {}); // global sudo does not leak through
+test('validateConfig refuses dockerd.hosts — it would put the Docker API on the network', () => {
+  assert.throws(() => validateConfig({ dockerd: { hosts: ['tcp://0.0.0.0:2375'] } }, { knownFlags: KNOWN_FLAGS }),
+    /dockerd\.hosts' is not allowed/);
+  assert.throws(() => validateConfig({ dockerd: ['x'] }, { knownFlags: KNOWN_FLAGS }), /'dockerd' must be an object/);
 });
 
-test('precedence: global defaults apply only without a project file', () => {
-  const eff = resolveEffectiveConfig({
-    global: { memory: '32g', flags: { egress: true } },
-  });
-  assert.equal(eff.memory, '32g');
-  assert.deepEqual(eff.flags, { egress: true });
-  assert.equal(eff.egress, null); // egress policy is project-scoped
+test('only a project file names profiles, and only by safe names', () => {
+  assert.doesNotThrow(() => validateConfig({ profiles: ['base', 'web-1.x'] }, { knownFlags: KNOWN_FLAGS }));
+  assert.throws(() => validateConfig({ profiles: ['../etc'] }, { knownFlags: KNOWN_FLAGS }), /profile names/);
+  assert.throws(() => validateConfig({ profiles: ['a'] }, { scope: 'profile', knownFlags: KNOWN_FLAGS }),
+    /unknown key 'profiles'/);
+  assert.throws(() => validateConfig({ profiles: ['a'] }, { scope: 'global', knownFlags: KNOWN_FLAGS }),
+    /unknown key 'profiles'/);
 });
 
-test('egress policy comes only from the project file', () => {
-  const eff = resolveEffectiveConfig({
-    project: { egress: { presets: ['anthropic'], allow: ['x'] } },
-  });
-  assert.deepEqual(eff.egress, { presets: ['anthropic'], allow: ['x'] });
-});
-
-test('no files, no CLI -> everything undefined (built-in defaults apply)', () => {
-  const eff = resolveEffectiveConfig({});
-  assert.equal(eff.memory, undefined);
-  assert.deepEqual(eff.flags, {});
-  assert.equal(eff.egress, null);
+test('a profile may carry egress policy but not the memory budget', () => {
+  assert.doesNotThrow(() => validateConfig({ egress: { presets: ['anthropic'] } }, { scope: 'profile', knownFlags: KNOWN_FLAGS }));
+  assert.throws(() => validateConfig({ memoryBudget: '50%' }, { scope: 'profile', knownFlags: KNOWN_FLAGS }), /host policy/);
 });
 
 // --- configHash + unifiedDiff ---------------------------------------------------

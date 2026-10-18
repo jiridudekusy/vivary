@@ -1,11 +1,8 @@
-// Project/global JSON config: <workspace>/.vivary.json (committable, full
-// sandbox settings) and ~/.vivary/vivary.json (global defaults, used ONLY
-// when no project file exists — the two never merge).
-//
-// Precedence: CLI flags > .vivary.json > (only without a project file)
-// ~/.vivary/vivary.json > built-in defaults. A project file also overrides
-// sticky flags stored in sandbox.json — the overlay is in-memory per
-// invocation, so nothing file-derived is ever persisted as sticky.
+// Project/global/profile JSON config: <workspace>/.vivary.json (committable,
+// full sandbox settings), ~/.vivary/vivary.json (global defaults, used ONLY
+// when no project file exists) and ~/.vivary/profiles/<name>.json (named
+// profiles). How they stack is layers.mjs; everything file-derived is applied
+// in memory per invocation, never persisted as sticky.
 //
 // SECURITY: the agent inside the sandbox can write .vivary.json in the
 // workspace. It must not self-escalate (--sudo, egress allow rules) by
@@ -29,6 +26,25 @@ export const globalConfigFile = () => path.join(SANDBOXES_DIR, 'vivary.json');
 
 const SCALAR_KEYS = ['agent', 'runtime', 'memory', 'cpus'];
 
+// Profile names are file names in ~/.vivary/profiles — nothing that could
+// climb out of that directory.
+export const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+// The inner dockerd's daemon.json keys vivary refuses. `hosts` would put the
+// Docker API on the network — whoever reaches it runs privileged containers in
+// this sandbox — and it also drops the unix socket every tool here uses.
+const DOCKERD_FORBIDDEN = { hosts: 'it would expose the Docker API on the network' };
+
+// Keys each kind of file may carry:
+//   project — <workspace>/.vivary.json (agent-writable, approval-gated)
+//   global  — ~/.vivary/vivary.json: the defaults, plus host policy
+//   profile — ~/.vivary/profiles/<name>.json
+const SCOPE_KEYS = {
+  project: [...SCALAR_KEYS, 'flags', 'egress', 'dockerd', 'profiles'],
+  global: [...SCALAR_KEYS, 'flags', 'dockerd', 'memoryBudget'],
+  profile: [...SCALAR_KEYS, 'flags', 'egress', 'dockerd'],
+};
+
 // Flags that were renamed. Kept only to make the failure precise: an old name
 // still dies loudly (the file is agent-writable — silently remapping it would
 // mean acting on something the user never approved under that name), but the
@@ -37,20 +53,17 @@ const RENAMED_FLAGS = { 'own-modules': 'node-modules' };
 
 // --- pure: validation ----------------------------------------------------------
 
-// Validate a parsed config object. `scope` is 'project' | 'global' (the
-// global file supports the same keys except `egress` — policy is
-// project-scoped — plus `memoryBudget`, which is host policy and global-only). `knownFlags` maps flag name -> parseArgs type
+// Validate a parsed config object. `scope` is 'project' | 'global' | 'profile'
+// (SCOPE_KEYS: the global file has no `egress` — policy is project-scoped —
+// but `memoryBudget`, which is host policy and global-only; only a project
+// file names `profiles`). `knownFlags` maps flag name -> parseArgs type
 // ('boolean' | 'optional' | 'string'); unknown keys and unknown flags fail
 // loudly (typo protection), never silently.
 export function validateConfig(cfg, { scope = 'project', file = PROJECT_CONFIG_NAME, knownFlags = {} } = {}) {
   if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
     throw new Error(`${file}: must be a JSON object`);
   }
-  const known = new Set([
-    ...SCALAR_KEYS, 'flags',
-    ...(scope === 'project' ? ['egress'] : []),
-    ...(scope === 'global' ? ['memoryBudget'] : []),
-  ]);
+  const known = new Set(SCOPE_KEYS[scope] || SCOPE_KEYS.project);
   for (const key of Object.keys(cfg)) {
     if (key === 'memoryBudget' && scope !== 'global') {
       throw new Error(`${file}: 'memoryBudget' is host policy — set it in ${globalConfigFile()}, `
@@ -101,6 +114,19 @@ export function validateConfig(cfg, { scope = 'project', file = PROJECT_CONFIG_N
       }
     }
   }
+  if (cfg.dockerd !== undefined) {
+    if (cfg.dockerd === null || typeof cfg.dockerd !== 'object' || Array.isArray(cfg.dockerd)) {
+      throw new Error(`${file}: 'dockerd' must be an object (the inner dockerd's daemon.json)`);
+    }
+    for (const [key, why] of Object.entries(DOCKERD_FORBIDDEN)) {
+      if (key in cfg.dockerd) throw new Error(`${file}: 'dockerd.${key}' is not allowed — ${why}`);
+    }
+  }
+  if (cfg.profiles !== undefined) {
+    if (!Array.isArray(cfg.profiles) || cfg.profiles.some((p) => typeof p !== 'string' || !PROFILE_NAME.test(p))) {
+      throw new Error(`${file}: 'profiles' must be an array of profile names (letters, digits, . _ -)`);
+    }
+  }
   if (cfg.egress !== undefined) {
     if (cfg.egress === null || typeof cfg.egress !== 'object' || Array.isArray(cfg.egress)) {
       throw new Error(`${file}: 'egress' must be an object`);
@@ -127,28 +153,6 @@ export function parseConfig(raw, opts) {
     throw new Error(`${opts?.file || PROJECT_CONFIG_NAME}: invalid JSON — ${e.message}`);
   }
   return validateConfig(parsed, opts);
-}
-
-// --- pure: precedence -----------------------------------------------------------
-
-// Resolve the effective invocation config. `project` and `global` are the
-// PARSED file contents (or null); the two files never merge — a project file
-// completely replaces the global defaults layer. Returns:
-//   { agent, runtime, memory, cpus,   — CLI > file (undefined = use defaults)
-//     flags,                          — file flags overlaid with CLI flags
-//     egress }                        — project file's egress section or null
-export function resolveEffectiveConfig({ cliFlags = {}, project = null, global: globalCfg = null } = {}) {
-  const fileCfg = project ?? globalCfg ?? {};
-  const core = new Set([...SCALAR_KEYS, 'name', 'workspace']);
-  const flags = { ...(fileCfg.flags || {}) };
-  for (const [k, v] of Object.entries(cliFlags)) {
-    if (v !== undefined && !core.has(k)) flags[k] = v;
-  }
-  const effective = { flags, egress: project?.egress ?? null };
-  for (const key of SCALAR_KEYS) {
-    effective[key] = cliFlags[key] !== undefined ? cliFlags[key] : fileCfg[key];
-  }
-  return effective;
 }
 
 // --- pure: approval hash + diff -------------------------------------------------
@@ -254,6 +258,33 @@ export function loadProjectConfig(workspace, knownFlags) {
 
 export function loadGlobalConfig(knownFlags) {
   return loadConfigFile(globalConfigFile(), { scope: 'global', knownFlags });
+}
+
+// Named profiles: ~/.vivary/profiles/<name>.json, written by the user on the
+// Mac (never mounted, so no approval gate). A name that has no file dies
+// loudly — a sandbox silently missing half its settings is worse.
+export const profilesDir = () => path.join(SANDBOXES_DIR, 'profiles');
+
+export function listProfileNames() {
+  try {
+    return fs.readdirSync(profilesDir()).filter((f) => f.endsWith('.json'))
+      .map((f) => f.slice(0, -5)).filter((n) => PROFILE_NAME.test(n)).sort();
+  } catch {
+    return [];
+  }
+}
+
+export function loadProfile(name, knownFlags) {
+  if (!PROFILE_NAME.test(name)) die(`invalid profile name '${name}' (letters, digits, . _ -)`);
+  const file = path.join(profilesDir(), `${name}.json`);
+  const loaded = loadConfigFile(file, { scope: 'profile', knownFlags });
+  if (!loaded) {
+    const known = listProfileNames();
+    die(`profile '${name}' not found: ${file}\n    `
+      + (known.length ? `known profiles: ${known.join(', ')}` : `create it — same keys as ${PROJECT_CONFIG_NAME}`)
+      + '\n    (a sandbox that lists it: give it the others with --profile a,b or --profile none)');
+  }
+  return { name, ...loaded };
 }
 
 // memoryBudget is HOST policy, not a per-project default, so it is the one key

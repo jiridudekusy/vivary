@@ -16,12 +16,38 @@ English, converse with the user in Czech.
   routes come from plugins), build (fat-image composer), plugin loader,
   host (host/VM resource probes + the memory budget gate), stats
   (`vivary stats`).
+- Settings come in LAYERS (`core/layers.mjs`, pure, unit-tested; IO side in
+  `core/effective.mjs`), highest first: CLI > project `.vivary.json` > the
+  sandbox's OWN (sticky CLI values in sandbox.json) > named PROFILES
+  (`~/.vivary/profiles/<name>.json`, the last listed wins) > the default file
+  `~/.vivary/vivary.json` (ONLY when the workspace has no .vivary.json — the
+  user's rule) > built-ins. The user chose "set by hand on a sandbox beats its
+  profiles". Lists (publish, volume) from profiles/default are ADDED to the
+  winning layer's list; `dockerd` (daemon.json) deep-merges, arrays as unions;
+  egress presets/allow union across profiles + project. A stored `false` in
+  sandbox.json means "never said" (createSandbox writes false for every flag),
+  so an explicit off is recorded in `flagsOff` (`--headed=off`; a boolean
+  `--x=off` used to read as ON — any string was truthy). Resolved values go on
+  cfg in memory only: saveSandbox writes back the sandbox's own value for every
+  overlaid key, else an unrelated save (a port, desiredRunning) turned a
+  profile's or file's value into a sticky one and removing it from the profile
+  changed nothing (that leak existed for .vivary.json before profiles; a key a
+  plugin changes after the overlay — paseo turning tailscale on — IS saved).
+  agent/runtime are not layered: profiles and the default SEED them at creation
+  (`creationSeeds`, CLI > last profile > default), then they are the sandbox's
+  own. Sandboxes keep `profiles` (sticky, `--profile a,b`, `none` clears); a
+  project file may add `"profiles": [...]` (approval-gated; never written back,
+  names are host-specific). Profiles are host-only, so no approval gate; their
+  mounts get origin 'profile' (trusted like CLI). `vivary config <name>` prints
+  every value with its source; `vivary profile ls|show`. Commands that only
+  READ flags (`vivary headed`, `vivary paseo`) must use `effectiveSandbox`, not
+  loadSandbox — the flag may live in a profile or the approved project file.
 - Project config: `<workspace>/.vivary.json` (committable; agent, runtime,
-  memory/cpus, sticky `flags`, `egress: {presets, allow}`) — created by
-  `vivary init`, unknown keys die loudly. Global defaults in
-  `~/.vivary/vivary.json` apply ONLY when no project file exists (no
-  merging). Precedence: CLI > project file > global > built-ins; CLI flags
-  that extend the file are written back (union only) and auto-approved.
+  memory/cpus, sticky `flags`, `egress: {presets, allow}`, `dockerd`,
+  `profiles`) — created by `vivary init` (which writes the sandbox's own and
+  the default file's values, never profile values: profiles keep applying),
+  unknown keys die loudly. CLI flags that extend the file are written back
+  (union only) and auto-approved.
   SECURITY: the file is agent-writable, so every content change is gated
   host-side — sha256 in sandbox.json (`configApproved`) + verbatim copy in
   `~/.vivary/<name>/vivary-approved.json`, unified diff + [y/N] on TTY,
@@ -31,8 +57,8 @@ English, converse with the user in Czech.
   skipped each sandbox's file (no approval gate, global defaults — agent-sandbox
   ran 8g/6 against an approved 4g/4) or loaded another project's file for it.
   A --workspace that disagrees with an existing sandbox's dies. `vivary init`
-  writes the size a start would resolve today (CLI > sticky > global >
-  built-in), not the built-in 4g/4. `runtime` and `agent` follow CLI > project
+  writes the size a start would resolve today, not the built-in 4g/4.
+  `runtime` and `agent` follow CLI > project
   file > the sandbox's own; the global file only SEEDS a new sandbox — applied
   on every start it overrode the creation choice (findmy: `create
   --runtime=docker --agent=codex` came up on Apple `container` and would have
@@ -335,6 +361,27 @@ English, converse with the user in Czech.
   empty by itself. Verified on Apple `container` (8 GB sandbox, kernel 6.18,
   docker 29.1.3): single- and multi-node `kind create cluster` Ready, nginx
   deployment + service DNS reachable, `docker run --memory=256m` honoured.
+- Inner dockerd settings (`dockerd` key -> daemon.json): applied by the HOST
+  on every start (docker plugin postUp -> `<runtime> exec -i --user root
+  dockerd-config` with the JSON on stdin), never baked in, so no --recreate.
+  dockerd-config validates (`dockerd --validate`), diffs keys, SIGHUPs when all
+  changed keys are live-reloadable (insecure-registries, registry-mirrors, ...),
+  else restarts dockerd under `setsid -w` (Apple ends an exec session's
+  processes) and says how many inner containers that stopped. It shares a flock
+  with start-dockerd: postUp races the boot hook, and a SIGHUP to a dockerd
+  still starting would kill it. dockerd must not inherit that lock fd (`9>&-`),
+  or it holds the lock for life. Verified on both runtimes: an HTTP registry
+  inside the sandbox refuses `docker push` ("server gave HTTP response to HTTPS
+  client") until a profile adds `insecure-registries` (a CIDR survives Apple's
+  incrementing DHCP IPs), then reloaded live; `log-level` restarts dockerd, a
+  `--restart=always` container comes back. STALE PID FILES: /run is on the kept
+  container's rootfs, so /run/docker/containerd/containerd.pid survives a
+  restart and its PID gets reused (it was the clipboard hook's bash) -> dockerd
+  died "failed to start containerd: ... process with PID 78 is still running" on
+  some restarts of every --docker sandbox. start-dockerd drops a pid file whose
+  PID is not the daemon it names (/proc/<pid>/comm); 4/4 restarts clean after.
+  Docker runtime: /var/lib/docker is the named volume `<cname>-docker`, which
+  nothing deleted — every `rm` now does (onRemove), like the node_modules ones.
 - virtiofs PINS HOST FILES: Apple's virtiofs keeps one host fd open in the VM
   process for every file/dir the guest kernel holds in its dentry/inode cache.
   A sandbox walking a big workspace runs that into the hundreds of thousands —

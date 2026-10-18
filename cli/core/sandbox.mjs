@@ -4,6 +4,7 @@ import path from 'node:path';
 import { HOME, IS_TTY, SANDBOXES_DIR, die, hostPortFree, readJson, sanitizeName } from './util.mjs';
 import { detectRuntime } from './runtime.mjs';
 import { getPlugins } from './plugins.mjs';
+import { normalizeFlag } from './layers.mjs';
 
 export function sandboxDir(name) {
   return path.join(SANDBOXES_DIR, name);
@@ -46,8 +47,24 @@ export function loadSandbox(name) {
   return null;
 }
 
+// Keys whose in-memory value came from a layer (project file, profiles,
+// defaults) for this invocation, with the sandbox's own value underneath.
+const OVERLAY = Symbol('vivary.overlay');
+
+// sandbox.json holds only what the sandbox itself was told (sticky CLI flags,
+// state). A key still carrying an overlaid value is written back as the
+// sandbox's own: otherwise any unrelated save (a port, desiredRunning) turned a
+// profile's or .vivary.json's value into the sandbox's — and removing it from
+// the profile then changed nothing. A key a plugin changed after the overlay
+// (paseo turning tailscale on) is the sandbox's own decision and is saved.
 export function saveSandbox(cfg) {
-  fs.writeFileSync(path.join(sandboxDir(cfg.name), 'sandbox.json'), JSON.stringify(cfg, null, 2));
+  const out = { ...cfg };
+  for (const [key, o] of Object.entries(cfg[OVERLAY] || {})) {
+    if (!sameStickyValue(cfg[key], o.value)) continue;
+    if (o.own === undefined) delete out[key];
+    else out[key] = o.own;
+  }
+  fs.writeFileSync(path.join(sandboxDir(cfg.name), 'sandbox.json'), JSON.stringify(out, null, 2));
 }
 
 export function listSandboxNames() {
@@ -112,19 +129,6 @@ export function resolveName(explicit, workspace) {
   return name;
 }
 
-// Normalize a raw flag value using the plugin flag definition. Default:
-// boolean presence. 'optional' flags may carry a value (--flag=N).
-//
-// `origin` tells normalize where the value came from: 'cli' means a human typed
-// it, 'file' means it came from .vivary.json — which the agent inside the
-// sandbox can write. Flags that hand out host access (mounts) trust the two
-// differently, so the distinction has to survive down to normalize.
-function normalizeFlag(def, value, origin = 'cli') {
-  if (value === undefined) return undefined;
-  if (def.normalize) return def.normalize(value, { origin });
-  return !!value;
-}
-
 // Sticky values may be arrays (list flags like --publish), so a reference
 // compare would report a change on every run and rewrite sandbox.json.
 function sameStickyValue(a, b) {
@@ -187,39 +191,55 @@ export function formatConfigChanges(changes) {
   return changes.map((c) => `      ${c.key}: ${show(c.from)} -> ${show(c.to)}`).join('\n');
 }
 
+// Store a CLI value as the sandbox's own. An explicit off (`--headed=off`,
+// `--node-modules=0`) is remembered in flagsOff: a stored false otherwise
+// looks like "never said", and a profile would turn the flag back on.
+function setOwnFlag(cfg, key, value) {
+  let changed = !sameStickyValue(cfg[key], value);
+  cfg[key] = value;
+  const off = new Set(cfg.flagsOff || []);
+  const had = off.has(key);
+  if (Array.isArray(value) ? value.length : value) off.delete(key);
+  else off.add(key);
+  if (had !== off.has(key)) changed = true;
+  if (off.size) cfg.flagsOff = [...off].sort();
+  else delete cfg.flagsOff;
+  return changed;
+}
+
+// Apply sticky plugin flags from the command line, persisting changes.
 export function applyStickyFlags(cfg, flags) {
   let changed = false;
   for (const p of getPlugins()) {
     for (const [flag, def] of Object.entries(p.flags || {})) {
       if (!def.sticky || flags[flag] === undefined) continue;
-      const key = def.cfgKey || flag;
-      const next = normalizeFlag(def, flags[flag]);
-      if (!sameStickyValue(cfg[key], next)) {
-        cfg[key] = next;
-        changed = true;
-      }
+      if (setOwnFlag(cfg, def.cfgKey || flag, normalizeFlag(def, flags[flag]))) changed = true;
     }
   }
   if (changed) saveSandbox(cfg);
 }
 
-// In-memory overlay of config-file flags (.vivary.json / global defaults)
-// onto the sandbox config for this invocation. Intentionally NOT persisted:
-// sticky values in sandbox.json only ever come from CLI flags, so removing a
-// flag from the file takes effect on the next run (values may still reach
-// sandbox.json via unrelated saves — e.g. tailscale persisting its port —
-// which is harmless: overlaid values passed the approval gate).
-// `fileFlags` arrives with CLI flags already overlaid on top (that is the
-// effective set for this invocation), so `cliFlags` is what tells the two apart
-// — without it a value the human typed would be judged as agent-written.
-export function overlayConfigFlags(cfg, fileFlags = {}, cliFlags = {}) {
-  for (const p of getPlugins()) {
-    for (const [flag, def] of Object.entries(p.flags || {})) {
-      if (!def.sticky || fileFlags[flag] === undefined) continue;
-      const origin = cliFlags[flag] === undefined ? 'file' : 'cli';
-      cfg[def.cfgKey || flag] = normalizeFlag(def, fileFlags[flag], origin);
-    }
+// `--profile a,b` replaces the sandbox's profile list; `--profile none`
+// empties it. Persisted only when it changes.
+export function applyProfileFlag(cfg, value) {
+  if (value === undefined) return;
+  const names = value.filter((n) => n !== 'none');
+  if (JSON.stringify(cfg.profiles || []) === JSON.stringify(names)) return;
+  if (names.length) cfg.profiles = names;
+  else delete cfg.profiles;
+  saveSandbox(cfg);
+}
+
+// Put the resolved values (resolveLayers) on cfg for this invocation — that is
+// what plugins read. Not persisted: see saveSandbox.
+export function applyResolvedFlags(cfg, resolved) {
+  const overlay = {};
+  for (const { key, value, source } of Object.values(resolved.flags)) {
+    if (value === undefined || source === 'sandbox' || source === 'cli') continue;
+    overlay[key] = { own: cfg[key], value };
+    cfg[key] = value;
   }
+  Object.defineProperty(cfg, OVERLAY, { value: overlay, enumerable: false, configurable: true });
 }
 
 export async function createSandbox(name, workspace, opts) {
@@ -235,10 +255,14 @@ export async function createSandbox(name, workspace, opts) {
     agent: opts.agent || 'claude',
     createdAt: new Date().toISOString(),
   };
+  const profiles = (opts.profile || []).filter((n) => n !== 'none');
+  if (profiles.length) cfg.profiles = profiles;
   for (const p of getPlugins()) {
     for (const [flag, def] of Object.entries(p.flags || {})) {
       if (!def.sticky) continue;
-      cfg[def.cfgKey || flag] = normalizeFlag(def, opts[flag]) ?? false;
+      const key = def.cfgKey || flag;
+      if (opts[flag] === undefined) cfg[key] = false;
+      else setOwnFlag(cfg, key, normalizeFlag(def, opts[flag]));
     }
   }
   saveSandbox(cfg);

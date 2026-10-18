@@ -64,13 +64,35 @@ prepare_cgroups() {
 
 prepare_cgroups
 
+# Serialised with dockerd-config, which the host runs right after a start —
+# while this boot hook may still be bringing dockerd up. dockerd-config holds
+# the lock itself when it restarts dockerd through here.
+if [ -z "${VIVARY_DOCKERD_LOCKED:-}" ]; then
+    exec 9>/run/vivary-dockerd.lock
+    flock 9
+fi
+
 # Already healthy? (a plain pgrep would match a defunct daemon)
 if docker version >/dev/null 2>&1; then
     exit 0
 fi
 rm -f /var/run/docker.sock
 
-dockerd >/var/log/dockerd.log 2>&1 &
+# Stale pid files. /run lives on the kept container's rootfs, so they survive a
+# restart, and after it the PID inside belongs to someone else (PID 78 was the
+# clipboard hook's bash) -> dockerd refuses to start: "failed to start
+# containerd: ... process with PID 78 is still running". Drop a file whose PID
+# is not the daemon it names.
+clear_stale_pid() {
+    local pid
+    pid="$(cat "$1" 2>/dev/null)" || return 0
+    [ "$(cat "/proc/${pid}/comm" 2>/dev/null)" = "$2" ] || rm -f "$1"
+}
+clear_stale_pid /var/run/docker.pid dockerd
+clear_stale_pid /var/run/docker/containerd/containerd.pid containerd
+
+# 9>&-: dockerd must not inherit the lock, or it would hold it for its lifetime.
+dockerd >/var/log/dockerd.log 2>&1 9>&- &
 
 for _ in $(seq 1 75); do
     [ -S /var/run/docker.sock ] && break

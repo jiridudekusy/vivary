@@ -20,6 +20,7 @@ import { capture, die, parseArgs, resolveNpmVersion, sanitizeName } from '../../
 import {
   assignStablePort, loadSandbox, sandboxDir, saveSandbox,
 } from '../../core/sandbox.mjs';
+import { effectiveSandbox } from '../../core/effective.mjs';
 import { tailnetPortFree, tailscaleBin, tailscaleStatus } from '../tailscale/plugin.mjs';
 import { makeReadablePassword } from './password.mjs';
 
@@ -52,7 +53,8 @@ function serveUrl(cfg, fqdn) {
 export function cmdPaseo(argv = []) {
   const { positionals } = parseArgs(argv, {});
   const name = positionals[0] || sanitizeName(path.basename(process.cwd()));
-  const cfg = loadSandbox(name) || die(`sandbox '${name}' does not exist`);
+  // Resolved like a start (the flag may come from a profile or .vivary.json).
+  const cfg = effectiveSandbox(name) || die(`sandbox '${name}' does not exist`);
   if (!cfg.paseo) {
     die(`sandbox '${name}' does not run Paseo. Turn it on with: vivary up --paseo`);
   }

@@ -16,6 +16,7 @@ import {
   cmdAttach, cmdCreate, cmdDown, cmdExec, cmdInit, cmdList, cmdResume, cmdRm, cmdShell, cmdStart, cmdUp,
 } from './core/lifecycle.mjs';
 import { cmdStats } from './core/stats.mjs';
+import { cmdConfig, cmdProfile } from './core/config-cmd.mjs';
 import { loadMemoryBudget } from './core/config.mjs';
 
 function help(launchers) {
@@ -58,6 +59,10 @@ Commands:
   ide [name]           Open Cursor/VS Code into the sandbox via Remote-SSH
                        (implies 'up' when needed; --editor <bin> to force).
   ls | list            List sandboxes across runtimes.
+  config [name]        The sandbox's settings as its next start resolves them,
+                       each with the layer it came from.
+  profile [ls]         Named profiles (~/.vivary/profiles/<name>.json — same
+  profile show <name>  keys as .vivary.json) and the sandboxes that use them.
   stats [--trim] [--json]
                        How hard the VMs press on this Mac: RAM, CPU, swap,
                        and the kernel tables that have frozen it — open files
@@ -101,6 +106,9 @@ Core options (start/create/up/shell):
   --ignore-memory-budget
                        Start this once even if it goes over the budget.
   --cpus <n>           Container CPUs (default: $SANDBOX_CPUS or 4)
+  --profile <p>        Named profile(s), sticky, repeatable: settings from
+                       ~/.vivary/profiles/<p>.json; of several, the last one
+                       listed wins. --profile none clears the list.
   --ephemeral[=off]    Throw the container away on exit (the pre-persistence
                        behaviour). Sticky. By default containers are KEPT, so
                        apt/npm installs, kind, kubectl and docker images inside
@@ -120,9 +128,12 @@ Examples:
   vivary up && ssh claude-sandbox-myproj # ssh into the sandbox
   vivary ls                              # all sandboxes, both runtimes
 
-Project config: <workspace>/.vivary.json (committable; created by 'vivary
-init', changes are reviewed+approved on start). Global defaults (used only
-without a project file): ~/.vivary/vivary.json.
+Settings stack, highest first: the command line > <workspace>/.vivary.json
+(committable; created by 'vivary init', changes are reviewed+approved on
+start) > what was set on the sandbox itself > its profiles > the defaults in
+~/.vivary/vivary.json (used only without a project file). Lists (ports,
+mounts) and "dockerd" add up across layers. Turn an inherited flag off with
+--<flag>=off. 'vivary config' shows where each value came from.
 State lives in ~/.vivary/<name>/ (login, settings, skills, ssh keys).
 Chat history is shared with the host's ~/.claude/projects — visible from
 host Claude Code and vice versa. See README for details.`;
@@ -177,6 +188,13 @@ async function main() {
     case 'ls':
     case 'list':
       cmdList();
+      break;
+    case 'config':
+      cmdConfig(rest);
+      break;
+    case 'profile':
+    case 'profiles':
+      cmdProfile(rest);
       break;
     case 'stats':
       cmdStats(rest, { loadGlobalBudget: () => loadMemoryBudget(pluginFlagDefs()) });

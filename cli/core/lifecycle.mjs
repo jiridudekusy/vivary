@@ -10,20 +10,24 @@ import {
   openFilesWarning, parseBudget, requestedMemoryBytes, runningVmMemory,
 } from './host.mjs';
 import {
-  applyStickyFlags, containerConfigSnapshot, createSandbox, diffContainerConfig,
-  ensureSandbox, formatConfigChanges, listSandboxNames, loadSandbox,
-  overlayConfigFlags, resolveName, sandboxDir, saveSandbox,
+  applyProfileFlag, applyResolvedFlags, applyStickyFlags, containerConfigSnapshot, createSandbox,
+  diffContainerConfig, ensureSandbox, formatConfigChanges, listSandboxNames, loadSandbox,
+  resolveName, sandboxDir, saveSandbox,
 } from './sandbox.mjs';
 import { agentRegistry, getPlugins, pluginFlagDefs, pluginFlagSpec } from './plugins.mjs';
 import {
   PROJECT_CONFIG_NAME, approveProjectConfig, loadGlobalConfig, loadMemoryBudget, loadProjectConfig,
-  markApproved, resolveEffectiveConfig, writeBackCliFlags,
+  markApproved, writeBackCliFlags,
 } from './config.mjs';
+import { creationSeeds } from './layers.mjs';
+import { loadProfiles, resolveFor } from './effective.mjs';
 import { brokerEnvArgs, brokerEnvVars } from './broker.mjs';
 
 const CORE_FLAGS = {
   name: 'string', workspace: 'string', agent: 'string', runtime: 'string',
   memory: 'string', cpus: 'string',
+  // Named profiles (~/.vivary/profiles/<name>.json), sticky; `none` clears.
+  profile: 'list',
   // Containers PERSIST by default: whatever the agent installed inside (apt
   // packages, kind, kubectl, docker images on Apple `container`) survives a
   // down/up instead of being thrown away with --rm. --ephemeral restores the
@@ -35,28 +39,6 @@ const CORE_FLAGS = {
 
 function flagSpec() {
   return { ...CORE_FLAGS, ...pluginFlagSpec() };
-}
-
-// Precedence for the scalars buildRunSpec/cmdStart read:
-//   CLI > project .vivary.json > sticky sandbox.json > global defaults > built-in
-//
-// The sticky tier sits ABOVE the global defaults, unlike plugin flags where the
-// file always wins. `~/.vivary/vivary.json` is a fallback for sandboxes that
-// said nothing; it has no business resizing one that was explicitly given
-// `--memory 20g`. A project .vivary.json still wins — committed, deliberate,
-// per-project intent. The same holds for `agent`: it used to skip the sticky
-// tier on the theory that cmdStart falls back to sandbox.json — but the
-// global default filled the slot first, so a sandbox created with
-// `--agent=codex` started claude (findmy, 2026-10-17).
-export function resolveScalars(cliFlags = {}, projectConfig, cfg = {}, effective = {}) {
-  const flags = { ...cliFlags };
-  for (const key of ['agent', 'memory', 'cpus']) {
-    if (flags[key] !== undefined) continue;
-    if (projectConfig?.[key] !== undefined) flags[key] = projectConfig[key];
-    else if (cfg[key] !== undefined) flags[key] = cfg[key];
-    else if (effective[key] !== undefined) flags[key] = effective[key];
-  }
-  return flags;
 }
 
 // The runtime a start uses: CLI > project .vivary.json > the sandbox's own.
@@ -162,47 +144,71 @@ function sandboxWorkspace(cliFlags, explicitName) {
   }
 }
 
+// --profile names, each checked to exist BEFORE the list is stored: a stored
+// unknown name made every later command on that sandbox die.
+function checkedProfiles(value, knownFlags) {
+  if (value) loadProfiles(value.filter((n) => n !== 'none'), knownFlags);
+  return value;
+}
+
+// agent/runtime for a sandbox that does not exist yet: CLI > the profiles it
+// is created with > the default file (no project file). Empty when it exists.
+function seedsForNew(name, cliFlags, project, knownFlags) {
+  if (loadSandbox(name)) return {};
+  return creationSeeds({
+    cliFlags,
+    project,
+    profiles: loadProfiles((cliFlags.profile || []).filter((n) => n !== 'none'), knownFlags),
+    global: project ? null : loadGlobalConfig(knownFlags)?.config || null,
+  });
+}
+
 async function prepare(argv, opts = {}) {
   const { flags: cliFlags, positionals, rest } = parseArgs(argv, flagSpec(), opts);
-  const workspace = sandboxWorkspace(cliFlags, cliFlags.name || positionals[0]);
+  const explicitName = cliFlags.name || positionals[0];
+  const workspace = sandboxWorkspace(cliFlags, explicitName);
 
-  // Config files: project .vivary.json wins entirely over the global
-  // defaults (~/.vivary/vivary.json) — the two never merge. Loading dies
-  // loudly on invalid JSON / unknown keys.
   // Full defs (not just types): the validator needs `list` to know which flags
-  // also accept an array of strings in the file.
+  // also accept an array of strings in the file. Loading dies loudly on
+  // invalid JSON / unknown keys.
   const knownFlags = pluginFlagDefs();
   const project = loadProjectConfig(workspace, knownFlags);
-  const globalCfg = project ? null : loadGlobalConfig(knownFlags);
-  const effective = resolveEffectiveConfig({
-    cliFlags, project: project?.config, global: globalCfg?.config,
-  });
 
-  // The sandbox is created from CLI flags only; file-driven values are
-  // applied AFTER the approval gate, so nothing from an unapproved (agent-
-  // writable) file is ever persisted or acted upon.
-  const cfg = await ensureSandbox(cliFlags.name || positionals[0], {
-    ...cliFlags, agent: opts.forcedAgent || cliFlags.agent,
+  // The sandbox is created from CLI flags (+ agent/runtime seeds) only;
+  // file-driven values are applied AFTER the approval gate, so nothing from an
+  // unapproved (agent-writable) file is ever persisted or acted upon.
+  const seeds = seedsForNew(resolveName(explicitName, workspace), cliFlags, project?.config, knownFlags);
+  const cfg = await ensureSandbox(explicitName, {
+    ...cliFlags,
+    workspace,
+    agent: opts.forcedAgent || cliFlags.agent || seeds.agent,
+    runtime: cliFlags.runtime || seeds.runtime,
   });
   const dir = sandboxDir(cfg.name);
   if (project) await approveProjectConfig(cfg, project, dir, saveSandbox);
 
   applyStickyFlags(cfg, cliFlags); // CLI flags stay sticky, as before
+  applyProfileFlag(cfg, checkedProfiles(cliFlags.profile, knownFlags));
   writeBackCliFlags(cfg, project, cliFlags, stickyFlagNames(), dir, saveSandbox);
 
-  // File values override sticky sandbox.json values for this invocation
-  // (in-memory; effective.flags already has CLI flags overlaid on top).
-  overlayConfigFlags(cfg, effective.flags, cliFlags);
+  // Every layer — CLI, .vivary.json, the sandbox's own, profiles, defaults —
+  // resolved (layers.mjs) and put on cfg for this invocation, never persisted.
+  const resolved = resolveFor(cfg, { cliFlags, project: project?.config || null, knownFlags });
+  applyResolvedFlags(cfg, resolved);
   const runtime = startRuntime(cliFlags, project?.config, cfg);
   if (cliFlags.runtime && cliFlags.runtime !== cfg.runtime) {
     cfg.runtime = cliFlags.runtime;
     saveSandbox(cfg);
   }
   cfg.runtime = runtime;
-  // Egress policy (presets/allow) rides along for the egress plugin —
-  // non-enumerable so no saveSandbox() call can leak it into sandbox.json.
+  // Egress policy (presets/allow) and the inner dockerd's daemon.json ride
+  // along for their plugins — non-enumerable so no saveSandbox() call can leak
+  // them into sandbox.json.
   Object.defineProperty(cfg, 'egressPolicy', {
-    value: effective.egress, enumerable: false, configurable: true,
+    value: resolved.egress, enumerable: false, configurable: true,
+  });
+  Object.defineProperty(cfg, 'dockerdConfig', {
+    value: resolved.dockerd.value, enumerable: false, configurable: true,
   });
 
   // --ephemeral is a CORE flag, so applyStickyFlags (which walks plugin flags)
@@ -229,16 +235,13 @@ async function prepare(argv, opts = {}) {
     }
   }
 
-  // Backfill scalars where no CLI flag was given (buildRunSpec reads
-  // memory/cpus from flags; cmdStart reads the agent).
-  //
-  // For memory/cpus the sticky value outranks the GLOBAL default, unlike plugin
-  // flags where the file always wins. `~/.vivary/vivary.json` is a fallback for
-  // sandboxes that said nothing — it has no business resizing a sandbox that
-  // was explicitly given `--memory 20g`. A PROJECT .vivary.json still wins:
-  // that is committed, deliberate, per-project intent.
-  // Net order: CLI > project file > sticky sandbox.json > global > built-in.
-  const flags = resolveScalars(cliFlags, project?.config, cfg, effective);
+  // Scalars where no CLI flag was given (buildRunSpec reads memory/cpus from
+  // flags; cmdStart reads the agent): CLI > project file > the sandbox's own >
+  // profiles > defaults > built-in, as resolved above.
+  const flags = { ...cliFlags };
+  for (const key of ['agent', 'memory', 'cpus']) {
+    if (flags[key] === undefined && resolved[key].value !== undefined) flags[key] = resolved[key].value;
+  }
   return { cfg, flags, rest };
 }
 
@@ -771,27 +774,16 @@ export async function cmdCreate(argv) {
   const workspace = path.resolve(cliFlags.workspace || positionals[1] || process.cwd());
   const name = cliFlags.name || positionals[0] || sanitizeName(path.basename(workspace));
 
-  // Seed the new sandbox from the global defaults (~/.vivary/vivary.json), so
-  // `create` matches what start/up would use and the onCreate wizards see the
-  // real flags. That file is host-owned (never mounted, not agent-writable),
-  // hence no approval gate. A project .vivary.json wins over the global file
-  // entirely — but it IS agent-writable, so it must pass the approval gate,
-  // which needs the sandbox to exist; it is therefore applied on first start.
+  // agent/runtime are seeded the way a first start would (CLI > profiles > the
+  // default file), since after creation they belong to the sandbox. Flags are
+  // NOT copied in: profiles and the default apply live on every start, so a
+  // later edit of either reaches this sandbox too. A project .vivary.json is
+  // agent-writable and must pass the approval gate, which needs the sandbox
+  // to exist; it is therefore applied on first start.
   const knownFlags = pluginFlagDefs();
   const project = loadProjectConfig(workspace, knownFlags);
-  const globalCfg = project ? null : loadGlobalConfig(knownFlags);
-  const opts = { ...cliFlags, interactive: true };
-  if (globalCfg) {
-    const effective = resolveEffectiveConfig({ cliFlags, global: globalCfg.config });
-    for (const [flag, value] of Object.entries(effective.flags)) {
-      if (opts[flag] === undefined) opts[flag] = value;
-    }
-    for (const key of ['agent', 'runtime']) {
-      if (opts[key] === undefined && effective[key] !== undefined) opts[key] = effective[key];
-    }
-    console.log(`==> Defaults from ${globalCfg.file}`);
-  }
-
+  const seeds = seedsForNew(name, cliFlags, project?.config, knownFlags);
+  const opts = { ...cliFlags, ...seeds, interactive: true };
   await createSandbox(name, workspace, opts);
   if (project) {
     console.log(`    ${PROJECT_CONFIG_NAME} found — applied (after approval) on first start.`);
@@ -813,25 +805,37 @@ export async function cmdInit(argv) {
   let cfg = loadSandbox(name);
   if (!cfg) cfg = await createSandbox(name, workspace, { ...flags, interactive: false });
   applyStickyFlags(cfg, flags); // CLI flags of this invocation count too
+  applyProfileFlag(cfg, checkedProfiles(flags.profile, pluginFlagDefs()));
 
+  // What the file takes over: the sandbox's own values and the defaults' — the
+  // default file stops applying once a .vivary.json exists, so its values are
+  // written in or they would be lost. Values from profiles stay out: profiles
+  // keep applying with a project file, and copying them would freeze them here.
+  const knownFlags = pluginFlagDefs();
+  const resolved = resolveFor(cfg, { cliFlags: flags, project: null, knownFlags });
+  const take = (src) => !src.startsWith('profile:') && src !== 'built-in';
   const fileFlags = {};
-  for (const [flag, def] of Object.entries(pluginFlagDefs())) {
-    if (!def.sticky) continue;
-    const v = cfg[def.cfgKey || flag];
-    if (v) fileFlags[flag] = v; // only enabled features — the file stays minimal
+  for (const [flag, r] of Object.entries(resolved.flags)) {
+    if (take(r.source) && (Array.isArray(r.value) ? r.value.length : r.value)) fileFlags[flag] = r.value;
   }
-  // Size the file the way a start resolves it today (CLI > sticky > global >
-  // built-in), so writing it does not quietly resize the sandbox: it used to
-  // put the built-in 4g/4 in, which then outranked the 8g/6 the sandbox ran
-  // with — and, the kept container having been created at 8g, made the next
-  // start refuse ("memory: 8g -> 4g").
-  const sized = resolveScalars(flags, null, cfg, loadGlobalConfig(pluginFlagDefs())?.config || {});
+  // Sized the way a start resolves it today, so writing the file does not
+  // quietly resize the sandbox: it used to put the built-in 4g/4 in, which
+  // then outranked the 8g/6 the sandbox ran with — and, the kept container
+  // having been created at 8g, made the next start refuse ("memory: 8g -> 4g").
+  const size = (key, fallback) => {
+    const r = resolved[key];
+    if (r.source.startsWith('profile:')) return undefined;
+    return r.value || fallback;
+  };
+  const dockerd = resolved.dockerd.sources.includes('default')
+    ? loadGlobalConfig(knownFlags)?.config?.dockerd : undefined;
   const project = {
     agent: flags.agent || cfg.agent || 'claude',
     runtime: flags.runtime || cfg.runtime,
-    memory: sized.memory || process.env.SANDBOX_MEMORY || '4g',
-    cpus: sized.cpus || process.env.SANDBOX_CPUS || '4',
+    memory: size('memory', process.env.SANDBOX_MEMORY || '4g'),
+    cpus: size('cpus', process.env.SANDBOX_CPUS || '4'),
     flags: fileFlags,
+    ...(dockerd ? { dockerd } : {}),
     ...(fileFlags.egress ? { egress: { presets: [], allow: [] } } : {}),
   };
   const raw = JSON.stringify(project, null, 2) + '\n';
