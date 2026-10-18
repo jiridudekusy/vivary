@@ -585,6 +585,36 @@ English, converse with the user in Czech.
   per-VPN-agnostic (every addressed `utun` except Tailscale's CGNAT one);
   open question whether the user should pick tunnels (`--only SMARTA`) and
   whether to scope it per sandbox instead of the whole /24.
+- Trusted CAs (asked 2026-10-18): add extra root CAs to a sandbox (corporate
+  MITM proxy, private registry, internal services) and have EVERYTHING in it
+  trust them — not just curl. Today only the egress plugin installs a CA (ASHP's)
+  and only half-way: system store + NODE_EXTRA_CA_CERTS/REQUESTS_CA_BUNDLE/
+  SSL_CERT_FILE, but NOT Java and NOT Docker. Should become a generic mechanism
+  (sticky `--ca <file.pem>` list + `.vivary.json` `ca: [...]`, maybe an import
+  from the macOS keychain) that egress then uses for its own CA. Delivery as
+  egress does it: a per-sandbox RO mount from the host, never fetched over the
+  network; installed by a root boot hook on EVERY start (a kept container keeps
+  its rootfs, so the hook must also REMOVE CAs dropped from the config — own
+  them under a `vivary-` prefix/alias). Stores to cover, checked in the image
+  2026-10-18:
+  system `/usr/local/share/ca-certificates` + update-ca-certificates (curl, git,
+  openssl, Go, python ssl via SSL_CERT_FILE); Node — ignores the system store,
+  NODE_EXTRA_CA_CERTS takes ONE file, so a merged bundle (Node 24 also has
+  NODE_USE_SYSTEM_CA=1); python requests REQUESTS_CA_BUNDLE, pip (certifi —
+  PIP_CERT); Java — Zulu has its OWN `$JAVA_HOME/lib/security/cacerts`
+  (-> zulu21-ca-arm64, no /etc/ssl/certs/java, no ca-certificates-java), so
+  `keytool -importcert` into it (covers Maven, Gradle, JCA/JSSE); Chromium
+  (Playwright, headed) — reads NSS `~/.pki/nssdb`, not the system store, and the
+  image has no `certutil` (libnss3-tools); env has to reach main process, exec
+  and ssh sessions (egress already does profile.d + sshd SetEnv). Docker inside
+  the sandbox (docker plugin): dockerd is Go and reads the system store at
+  START, so it must start after the hook or be restarted; per-registry CAs go to
+  `/etc/docker/certs.d/<host>/ca.crt`. The containers that docker RUNS do not
+  inherit any of it — including kind nodes, whose containerd pulls images
+  through its own store (kind `extraMounts` of the bundle +
+  update-ca-certificates in the node, or a containerd hosts.toml). Open: how far
+  vivary goes into arbitrary images run by the inner docker (offer a bundle
+  path to mount, or a helper for kind).
 - Automatic fd trimming: DEFERRED (decided 2026-10-15). With node_modules on
   the volume and the watcher fixed, only workspace sources still pin host
   files. Build it only if `ENFILE` lines reappear in broker.log (`vivary stats`
