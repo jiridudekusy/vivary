@@ -90,6 +90,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends tini \
 RUN apt-get update && apt-get install -y --no-install-recommends dtach \
     && rm -rf /var/lib/apt/lists/*
 
+# ping, telnet: quick network checks from inside a sandbox (is the VPN host
+# up, does that port answer). Late layer, same reason as tini.
+RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping telnet \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY rootfs/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY rootfs/fix-net.sh /usr/local/bin/fix-net
 COPY rootfs/profile.d-sandbox.sh /etc/profile.d/sandbox.sh
