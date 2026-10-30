@@ -20,6 +20,9 @@
 //   onPurge(name)                     — cleanup on rm --purge (runs first)
 //   broker(req helpers) -> handled?   — HTTP routes on the host broker
 //   commands   { broker: fn(argv) }   — extra CLI subcommands
+//   egressPresets(cfg) -> [names]     — egress presets a feature needs to work
+//                                       at all (opened with the feature, not
+//                                       left to the user's .vivary.json)
 //   buildArgs() -> {ARG: value}       — docker build args (pin network installs
 //                                       so a cached layer can't keep an old
 //                                       version; see agent-claude)

@@ -75,6 +75,27 @@ RUN npm install -g playwright \
     && chown -R agent:agent /opt/pw-browsers
 
 # --- Core sandbox plumbing -------------------------------------------------------
+# tini: PID 1 must reap orphans left behind by entrypoint hooks (see
+# entrypoint.sh). Deliberately its own late layer — folding it into the apt
+# block above would bust every layer after it (Node, JDK, Gradle, the
+# Playwright Chromium download) on a one-line change.
+RUN apt-get update && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# dtach: `vivary exec` runs a command in a detachable session — type a
+# password at its prompt, Ctrl-\ to detach, and the service keeps running
+# (`vivary attach` returns to it). dtach rather than tmux: it keeps no
+# scrollback, so nothing the program printed, a password it echoed included,
+# is retained anywhere but in the program itself.
+RUN apt-get update && apt-get install -y --no-install-recommends dtach \
+    && rm -rf /var/lib/apt/lists/*
+
+# ping, telnet, dig/nslookup/host: quick network checks from inside a sandbox
+# (is the VPN host up, does that port answer, what does the name resolve to).
+# Late layer, same reason as tini.
+RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping telnet bind9-dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY rootfs/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY rootfs/fix-net.sh /usr/local/bin/fix-net
 COPY rootfs/profile.d-sandbox.sh /etc/profile.d/sandbox.sh

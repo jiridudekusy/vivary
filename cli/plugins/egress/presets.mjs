@@ -54,6 +54,16 @@ export const PRESETS = {
     'api5.cursor.sh/*',
     'repo42.cursor.sh/*',
   ],
+  // Not an agent API but a hard dependency of the uunpm plugin: the uu-safe-*
+  // wrappers fetch the malicious-package list from here and fail CLOSED after a
+  // 5 s timeout, so behind deny-all every `npm install` aborts without it.
+  // Contributed automatically whenever --uunpm is on (see the egressPresets
+  // hook), so it cannot be forgotten; listed here so the pattern has one home.
+  // The npm registry itself is NOT included — that is the user's own policy
+  // choice, needed for any npm use with or without uunpm.
+  uunpm: [
+    'docs.plus4u.net/*',
+  ],
 };
 
 // Expand preset names to a flat pattern list; unknown names die loudly.

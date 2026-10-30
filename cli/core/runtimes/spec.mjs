@@ -3,6 +3,12 @@ import { getPlugins } from '../plugins.mjs';
 import { brokerEnvArgs } from '../broker.mjs';
 import { runtimeKind } from './index.mjs';
 
+// The size a sandbox VM is started with. Shared with the memory budget gate,
+// which must count exactly what `run` will be given.
+export function sandboxMemory(flags = {}) {
+  return flags.memory || process.env.SANDBOX_MEMORY || '4g';
+}
+
 export async function buildRunSpec(ctx, {
   rm, interactive, image, command = [], termEnv = [],
   plugins = getPlugins(), brokerEnv = brokerEnvArgs,
@@ -24,7 +30,7 @@ export async function buildRunSpec(ctx, {
     name: ctx.cname,
     image,
     cwd: cfg.workspace,
-    memory: flags.memory || process.env.SANDBOX_MEMORY || '4g',
+    memory: sandboxMemory(flags),
     cpus: flags.cpus || process.env.SANDBOX_CPUS || '4',
     rm, interactive,
     mounts: vm

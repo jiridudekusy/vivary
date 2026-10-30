@@ -16,9 +16,23 @@ import {
   ashpCaCertPath, mgmtCertPath, EGRESS_NET, MGMT_HOSTNAME, PROXY_PORT,
 } from './ashp.mjs';
 import { expandPresets } from './presets.mjs';
+import { getPlugins } from '../../core/plugins.mjs';
 
 // Where the per-sandbox egress dir (ASHP CA) mounts inside a tart guest.
 const TART_EGRESS_DIR = '/Users/admin/.vivary-egress';
+
+// A feature can need an egress hole to work at all (uunpm's malicious-package
+// list, say). Such a plugin declares `egressPresets(cfg) -> [names]` and the
+// hole opens with the feature instead of waiting for the user to remember a
+// preset in .vivary.json — the failure mode otherwise is a broken install, not
+// a visible denial. Union with the policy's own presets, deduped.
+export function collectPresets(cfg, policyPresets = [], plugins = getPlugins()) {
+  const names = new Set(policyPresets);
+  for (const p of plugins) {
+    for (const name of p.egressPresets?.(cfg) || []) names.add(name);
+  }
+  return [...names];
+}
 
 export default {
   name: 'egress',
@@ -48,7 +62,7 @@ export default {
     // No policy (no file / no egress section) -> sync to empty, which drops
     // stale vivary-managed rules and leaves deny-all + UI approval.
     const policy = cfg.egressPolicy || {};
-    const patterns = [...expandPresets(policy.presets), ...(policy.allow || [])];
+    const patterns = [...expandPresets(collectPresets(cfg, policy.presets)), ...(policy.allow || [])];
     await syncAgentRules(ip, adminPassword, cfg.name, patterns);
 
     // Deliver the MITM CA (public) and the mgmt TLS cert (public) to the
@@ -100,7 +114,7 @@ export default {
     const { ip, adminPassword } = await ensureAshp(runtime);
     const token = await ensureAgent(ip, adminPassword, cfg.name);
     const policy = cfg.egressPolicy || {};
-    const patterns = [...expandPresets(policy.presets), ...(policy.allow || [])];
+    const patterns = [...expandPresets(collectPresets(cfg, policy.presets)), ...(policy.allow || [])];
     await syncAgentRules(ip, adminPassword, cfg.name, patterns);
 
     const egressDir = path.join(sandboxDir(cfg.name), 'egress');

@@ -3,7 +3,7 @@
 // project) and the import wizard (MCP servers, skills, settings, statusline).
 import fs from 'node:fs';
 import path from 'node:path';
-import { HOME, ask, capture, readJson } from '../../core/util.mjs';
+import { HOME, ask, capture, readJson, resolveNpmVersion } from '../../core/util.mjs';
 
 const HOST_CLAUDE_DIR = path.join(HOME, '.claude');
 const HOST_CLAUDE_JSON = path.join(HOME, '.claude.json');
@@ -197,7 +197,14 @@ export default {
   // reusing a cached install layer. SANDBOX_CLAUDE_CHANNEL takes 'latest'
   // (default), 'stable', or an exact version.
   buildArgs() {
-    return { CLAUDE_CODE_VERSION: resolveClaudeVersion() };
+    const cc = resolveNpmVersion('ccstatusline');
+    if (!cc) {
+      console.error('WARNING: could not resolve the ccstatusline version — building unpinned');
+    }
+    return {
+      CLAUDE_CODE_VERSION: resolveClaudeVersion(),
+      CCSTATUSLINE_VERSION: cc || 'latest',
+    };
   },
   macosProvision: ['npm install -g @anthropic-ai/claude-code'],
 

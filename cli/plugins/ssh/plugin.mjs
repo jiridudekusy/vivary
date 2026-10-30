@@ -7,9 +7,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HOME, SANDBOXES_DIR, capture, die, hasCmd, parseArgs } from '../../core/util.mjs';
 import { containerName, containerDnsDomain } from '../../core/runtime.mjs';
-import { resolveRuntime } from '../../core/runtimes/index.mjs';
-import { assignStablePort, ensureSandbox } from '../../core/sandbox.mjs';
+import { resolveRuntime, runtimeKind } from '../../core/runtimes/index.mjs';
+import {
+  assignStablePort, ensureSandbox, listSandboxNames, loadSandbox, sandboxDir,
+  saveSandbox,
+} from '../../core/sandbox.mjs';
 import { cmdUp } from '../../core/lifecycle.mjs';
+import {
+  DEVICES_DIR, deviceFile, listDevices, mergeAuthorizedKeys, parsePublicKey,
+} from './devices.mjs';
 
 function registerKnownHosts(dir, host, port) {
   const kh = path.join(HOME, '.ssh/known_hosts');
@@ -301,19 +307,178 @@ function ensureKeypair(dir, cname, log) {
     fs.mkdirSync(path.join(dir, 'ssh'), { recursive: true });
     const r = capture('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', cname, '-f', keyFile]);
     if (r.status !== 0) die(`ssh-keygen failed: ${r.stderr}`);
-    fs.copyFileSync(`${keyFile}.pub`, path.join(dir, 'ssh/authorized_keys'));
     log(`==> Generated SSH keypair in ${path.join(dir, 'ssh')}`);
   }
+  // Rebuilt on EVERY start, not just at creation: a device registered since the
+  // last start has to reach this sandbox too, which is the whole point of
+  // device keys (enrol once, every sandbox).
+  writeAuthorizedKeys(dir, log);
   return keyFile;
+}
+
+// authorized_keys = this sandbox's own pubkey + every registered device key.
+export function writeAuthorizedKeys(dir, log = () => {}) {
+  const pub = path.join(dir, 'ssh/id_ed25519.pub');
+  const target = path.join(dir, 'ssh/authorized_keys');
+  const own = fs.existsSync(pub) ? fs.readFileSync(pub, 'utf8') : '';
+  const devices = listDevices();
+  const next = mergeAuthorizedKeys(own, devices);
+  const current = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
+  if (current === next) return devices;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, next, { mode: 0o600 });
+  if (devices.length) {
+    log(`==> SSH: ${devices.length} device key(s) authorized (${devices.map((d) => d.name).join(', ')})`);
+  }
+  return devices;
+}
+
+// `vivary key add|ls|rm` — the device-key registry.
+//
+// Enrolling or revoking is pushed to every RUNNING sandbox immediately: the
+// mounted authorized_keys is rewritten and start-sshd re-installs it (that
+// script refreshes the file before its "already running" guard, so sshd is not
+// restarted and live sessions are untouched). Stopped sandboxes pick it up on
+// their next start, because ensureKeypair rebuilds the file every time.
+function pushToRunningSandboxes() {
+  const pushed = [];
+  for (const name of listSandboxNames()) {
+    const cfg = loadSandbox(name);
+    if (!cfg || runtimeKind(cfg.runtime) === 'vm-tart') continue;
+    const rt = resolveRuntime(cfg.runtime);
+    if (!rt.isRunning(name)) continue;
+    writeAuthorizedKeys(sandboxDir(name));
+    // Refresh ONLY where sshd is already up. Calling start-sshd unconditionally
+    // would launch sshd (and generate host keys) in a sandbox whose owner never
+    // asked for it — the SANDBOX_SSH gate exists precisely to prevent that.
+    // Where sshd is off, the rewritten file is enough: it is installed at the
+    // next start. Failures are reported, not fatal — one unreachable sandbox
+    // must not abort the enrolment.
+    // VERIFY, don't assume: a container still running an image from before
+    // start-sshd learned to refresh keys ahead of its "already running" guard
+    // exits 0 without installing anything. Comparing the mounted file with the
+    // installed one turns that into a precise "restart this one" instead of a
+    // false "applied".
+    const r = rt.exec(rt.instanceName(name), ['sh', '-c',
+      'pgrep -x sshd >/dev/null 2>&1 || exit 3; '
+      + 'sudo /usr/local/bin/start-sshd >/dev/null 2>&1; '
+      + 'cmp -s /home/agent/host-ssh/authorized_keys /home/agent/.ssh/authorized_keys || exit 4'],
+      { interactive: false });
+    const code = typeof r === 'number' ? r : r?.status;
+    if (code === 3) continue;          // sshd not running here — nothing to refresh
+    pushed.push({ name, ok: code === 0, stale: code === 4 });
+  }
+  return pushed;
+}
+
+function reportPush(pushed) {
+  const ok = pushed.filter((p) => p.ok).map((p) => p.name);
+  const stale = pushed.filter((p) => p.stale).map((p) => p.name);
+  const bad = pushed.filter((p) => !p.ok && !p.stale).map((p) => p.name);
+  if (ok.length) console.log(`==> Applied to running sandbox(es): ${ok.join(', ')}`);
+  if (stale.length) {
+    console.error(`WARNING: ${stale.join(', ')} run an image older than this feature — `
+      + 'NOT applied there. Restart them to pick it up: '
+      + `vivary down <name> && vivary up <name>`);
+  }
+  if (bad.length) {
+    console.error(`WARNING: could not refresh ${bad.join(', ')} — restart them `
+      + '(vivary down <name> && vivary up <name>) to apply');
+  }
+  console.log('==> Stopped sandboxes pick it up on their next start.');
+}
+
+export function cmdKey(argv = []) {
+  const { flags, positionals } = parseArgs(argv, { file: 'string', key: 'string' });
+  const [action, name] = positionals;
+
+  if (!action || action === 'ls' || action === 'list') {
+    const devices = listDevices();
+    if (!devices.length) {
+      console.log('No device keys registered.\n'
+        + '  Add one so a device (iPad, phone, another laptop) reaches EVERY sandbox\n'
+        + '  with a single key:\n'
+        + '    vivary key add ipad --file ~/Downloads/id_ed25519.pub\n'
+        + '    vivary key add ipad --key "ssh-ed25519 AAAA... me@ipad"');
+      return;
+    }
+    for (const d of devices) {
+      const parts = d.key.split(/\s+/);
+      console.log(`  ${d.name.padEnd(16)} ${parts[0]} ...${parts[1].slice(-16)}  ${parts[2] || ''}`);
+    }
+    return;
+  }
+
+  if (action === 'add') {
+    if (!name) die('usage: vivary key add <device-name> [--file <path.pub> | --key "<ssh-... >"]');
+    let text = flags.key;
+    if (flags.file) {
+      const f = flags.file.replace(/^~(?=\/)/, HOME);
+      if (!fs.existsSync(f)) die(`no such file: ${f}`);
+      text = fs.readFileSync(f, 'utf8');
+    }
+    if (!text) die('provide the key with --file <path.pub> or --key "<ssh-ed25519 ...>"');
+    let key;
+    try {
+      key = parsePublicKey(text);
+    } catch (e) {
+      die(`${e.message}`);                      // e.g. a private key was pasted
+    }
+    fs.mkdirSync(DEVICES_DIR, { recursive: true });
+    const target = deviceFile(name);
+    const existed = fs.existsSync(target);
+    fs.writeFileSync(target, `${key}\n`, { mode: 0o644 });
+    console.log(`==> Device '${name}' ${existed ? 'updated' : 'registered'} (${target})`);
+    reportPush(pushToRunningSandboxes());
+    return;
+  }
+
+  if (action === 'rm' || action === 'remove') {
+    if (!name) die('usage: vivary key rm <device-name>');
+    const target = deviceFile(name);
+    if (!fs.existsSync(target)) die(`no device key named '${name}' (see: vivary key ls)`);
+    fs.rmSync(target);
+    console.log(`==> Device '${name}' revoked`);
+    reportPush(pushToRunningSandboxes());
+    return;
+  }
+
+  die(`unknown action '${action}' (expected: add, ls, rm)`);
+}
+
+// Before ssh became a flag, `vivary up` turned sshd on unconditionally — and
+// with it the HOST-side bits: a managed ssh_config Host block and a known_hosts
+// entry. That quietly broke "no flag -> no feature". Making it opt-in would
+// break every sandbox created under the old behaviour, so one is inferred:
+// a sandbox whose keypair already exists was an ssh sandbox, and stays one.
+export function inferLegacySsh(cfg, dir, save) {
+  if (cfg.ssh !== undefined) return cfg.ssh;
+  const had = fs.existsSync(path.join(dir, 'ssh/id_ed25519'));
+  cfg.ssh = had;
+  save(cfg);
+  return had;
 }
 
 export default {
   name: 'ssh',
   order: 30,
-  commands: { ide: cmdIde },
+  commands: { ide: cmdIde, key: cmdKey },
+
+  flags: {
+    ssh: {
+      type: 'boolean',
+      sticky: true,
+      cfgKey: 'ssh',
+      help: 'Run sshd in the sandbox (sticky) so ssh, IDEs and Claude\nDesktop can attach, and manage this sandbox\'s block in\n~/.vivary/ssh/config. `vivary up` needs this or\n--tailscale — without either, nothing can reach the\nsandbox except `vivary shell` on this Mac.',
+    },
+  },
+
+  // Used by cmdUp's reachability gate before any container is built.
+  inferReachable: (cfg) => inferLegacySsh(cfg, sandboxDir(cfg.name), saveSandbox),
 
   async upArgs(ctx) {
     const { cfg, dir, cname } = ctx;
+    if (!inferLegacySsh(cfg, dir, saveSandbox) && !cfg.tailscale) return [];
     // Per-sandbox SSH keypair; the public key becomes authorized_keys inside.
     ensureKeypair(dir, cname, ctx.log);
 
@@ -340,6 +505,12 @@ export default {
 
   async postUp(ctx) {
     const { cfg, dir } = ctx;
+    // upArgs sets ctx.ssh exactly when it turned sshd on; without it there is no
+    // sshd, no host keys to wait for and no endpoint to write into ssh_config.
+    // Guarding on ctx.ssh rather than re-deriving the condition keeps the two
+    // hooks from drifting apart — and keeps "no flag -> no feature" honest: an
+    // unguarded postUp still wrote this sandbox's managed Host block.
+    if (!ctx.ssh) return;
     // Host keys are generated inside the container on first boot — wait for
     // them, then pre-trust them so Claude Desktop's verification passes.
     const hostkeysDir = path.join(dir, 'ssh/hostkeys');

@@ -4,5 +4,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && usermod -aG docker agent
 COPY plugins/docker/rootfs/start-dockerd.sh /usr/local/bin/start-dockerd
-RUN chmod +x /usr/local/bin/start-dockerd \
+COPY plugins/docker/rootfs/dockerd-config.sh /usr/local/bin/dockerd-config
+RUN chmod +x /usr/local/bin/start-dockerd /usr/local/bin/dockerd-config \
     && echo "agent ALL=(root) NOPASSWD: /usr/local/bin/start-dockerd" > /etc/sudoers.d/agent-docker

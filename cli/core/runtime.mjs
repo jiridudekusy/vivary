@@ -15,6 +15,23 @@ export function containerName(name) {
 }
 
 // Names of running containers, per runtime. Missing runtime -> empty set.
+// Every container the runtime knows, RUNNING OR STOPPED. Persistent sandboxes
+// (the default — see cmdUp) leave a stopped container behind, and `run` on an
+// existing name fails hard ("container with id X already exists"), so the
+// lifecycle has to branch on existence, not just on running.
+export function allSet(runtime) {
+  if (!hasCmd(runtime)) return new Set();
+  if (runtime === 'docker') {
+    const { status, stdout } = capture('docker', ['ps', '-a', '--format', '{{.Names}}']);
+    return new Set(status === 0 ? stdout.split('\n').filter(Boolean) : []);
+  }
+  const { status, stdout } = capture('container', ['ls', '-a']);
+  if (status !== 0) return new Set();
+  return new Set(
+    stdout.split('\n').slice(1).map((l) => l.trim().split(/\s+/)[0]).filter(Boolean)
+  );
+}
+
 export function runningSet(runtime) {
   if (!hasCmd(runtime)) return new Set();
   if (runtime === 'docker') {

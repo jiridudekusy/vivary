@@ -1,0 +1,265 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f3f6fb" media="(prefers-color-scheme:light)">
+<meta name="theme-color" content="#0b111b" media="(prefers-color-scheme:dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>vivary</title>
+<style>
+/* Design tokens lifted from approval-mcp-wrapper (apps/web/src/styles.css) so
+   the two tools read as one product. Their app switches theme via
+   [data-theme='dark']; a phone has no such switch here, so the same dark values
+   are also bound to prefers-color-scheme. */
+@font-face{font-family:Roboto;src:url('/assets/fonts/latin-ext-normal.woff2') format('woff2');
+  font-style:normal;font-weight:100 900;font-display:swap}
+@font-face{font-family:'Roboto Mono';src:url('/assets/fonts/latin-ext-400-normal.woff2') format('woff2');
+  font-weight:400;font-display:swap}
+@font-face{font-family:'Roboto Mono';src:url('/assets/fonts/latin-700-normal.woff2') format('woff2');
+  font-weight:700;font-display:swap}
+
+:root{
+  color-scheme:light;
+  --primary:#2563eb; --primary-hover:#1d4ed8; --primary-text:#1d4ed8;
+  --primary-ultra:#eff6ff; --primary-soft:#dbeafe;
+  --positive:#15803d; --warning:#c2410c; --negative:#b91c1c;
+  --surface:#ffffff; --surface-soft:#f8fafc; --ground:#f3f6fb;
+  --fg:#172033; --fg-strong:#0f172a; --muted:#64748b; --muted-strong:#475569;
+  --line:#d8e0ea; --line-soft:#e9eef5;
+  --pos-soft:#ecfdf3; --warn-soft:#fff7ed; --neg-soft:#fef2f2;
+  --shadow-sm:0 1px 2px rgb(15 23 42 / .05);
+  --shadow-md:0 8px 24px rgb(15 23 42 / .08);
+  --shadow-lg:0 24px 64px rgb(15 23 42 / .22);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    color-scheme:dark;
+    --primary:#60a5fa; --primary-hover:#93c5fd; --primary-text:#93c5fd;
+    --primary-ultra:rgb(59 130 246 / .12); --primary-soft:rgb(59 130 246 / .2);
+    --positive:#4ade80; --warning:#fb923c; --negative:#f87171;
+    --surface:#121a28; --surface-soft:#0f1724; --ground:#0b111b;
+    --fg:#dce5f1; --fg-strong:#f8fafc; --muted:#8fa0b7; --muted-strong:#b4c1d1;
+    --line:#2b394c; --line-soft:#202c3c;
+    --pos-soft:rgb(34 197 94 / .12); --warn-soft:rgb(249 115 22 / .12);
+    --neg-soft:rgb(239 68 68 / .12);
+    --shadow-sm:0 1px 2px rgb(0 0 0 / .24);
+    --shadow-md:0 10px 28px rgb(0 0 0 / .24);
+    --shadow-lg:0 28px 72px rgb(0 0 0 / .5);
+  }
+}
+
+*{box-sizing:border-box}
+html{background:var(--ground);-webkit-text-size-adjust:100%}
+body{
+  margin:0;min-height:100vh;background:var(--ground);color:var(--fg);
+  font:400 14px/1.5 Roboto,Arial,sans-serif;font-synthesis:none;text-rendering:optimizeLegibility;
+  padding:max(18px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right))
+          max(32px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));
+  max-width:760px;margin-inline:auto;
+}
+button,input,textarea{font:inherit;color:inherit}
+
+.topbar{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}
+h1{margin:0;font-size:21px;font-weight:700;color:var(--fg-strong);letter-spacing:-.01em}
+#host{font:400 11px/1.4 'Roboto Mono',monospace;color:var(--muted);text-align:right;word-break:break-all;max-width:56%}
+#fleet{margin:0 0 18px;color:var(--muted);font-size:13px}
+#fleet b{color:var(--fg-strong);font-weight:700}
+
+.card{
+  border:1px solid var(--line);border-radius:14px;background:var(--surface);
+  padding:16px;box-shadow:var(--shadow-sm);margin-bottom:12px;
+}
+.head{display:flex;align-items:center;gap:9px;margin-bottom:4px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.card.on .status-dot{background:var(--positive)}
+.name{font:700 15px/1.3 'Roboto Mono',monospace;color:var(--fg-strong);word-break:break-all;flex:1}
+.state{
+  flex:none;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700;
+  background:var(--surface-soft);color:var(--muted-strong);border:1px solid var(--line-soft);
+}
+.card.on .state{background:var(--pos-soft);color:var(--positive);border-color:transparent}
+.meta{margin:2px 0 0;font:400 12px/1.55 'Roboto Mono',monospace;color:var(--muted);word-break:break-all}
+
+.ssh{
+  display:flex;align-items:center;gap:10px;width:100%;margin-top:13px;text-align:left;
+  background:var(--primary-ultra);border:1px solid var(--primary-soft);border-radius:9px;
+  padding:11px 12px;min-height:44px;cursor:pointer;
+  font:400 12px/1.45 'Roboto Mono',monospace;color:var(--primary-text);word-break:break-all;
+}
+.ssh span{flex:1}
+.ssh svg{flex:none;width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;opacity:.75}
+.hint{margin:12px 0 0;padding:10px 12px;border-radius:9px;background:var(--warn-soft);
+  color:var(--warning);font-size:12.5px;line-height:1.5}
+
+.act{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  margin-top:13px;width:100%;min-height:44px;border-radius:9px;font-size:14px;font-weight:700;
+  border:1px solid var(--primary);background:var(--primary);color:#fff;
+  box-shadow:0 4px 12px rgb(37 99 235 / .2);
+}
+@media (prefers-color-scheme:dark){.act{color:#08111f}}
+.act.stop{background:var(--surface);color:var(--negative);border-color:rgb(185 28 28 / .35);box-shadow:none}
+.act[disabled]{opacity:.55}
+
+section{margin-top:26px}
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+h2{margin:0;font-size:13px;font-weight:700;color:var(--muted-strong);text-transform:uppercase;letter-spacing:.06em}
+#refresh{border:1px solid var(--line);background:var(--surface);border-radius:9px;
+  padding:0 12px;min-height:36px;font-size:12px;font-weight:700;color:var(--muted-strong)}
+
+.dev{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line-soft)}
+.dev-name{font:700 13px/1 'Roboto Mono',monospace;color:var(--fg-strong);flex:none}
+.dev-key{flex:1;font:400 11px/1 'Roboto Mono',monospace;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev button{border:0;background:none;color:var(--negative);font-size:19px;min-width:44px;min-height:44px}
+.empty{color:var(--muted);font-size:13px;margin:10px 0 0}
+
+form{margin-top:14px;display:grid;gap:10px}
+input,textarea{
+  width:100%;background:var(--surface);border:1px solid var(--line);border-radius:9px;
+  padding:11px 12px;min-height:44px;font:400 12.5px/1.45 'Roboto Mono',monospace;color:var(--fg);
+}
+textarea{resize:vertical;min-height:84px}
+::placeholder{color:var(--muted)}
+:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+form button{border:1px solid var(--primary);background:var(--primary);color:#fff;
+  border-radius:9px;min-height:44px;font-size:14px;font-weight:700;box-shadow:0 4px 12px rgb(37 99 235 / .2)}
+@media (prefers-color-scheme:dark){form button{color:#08111f}}
+
+#toast{
+  position:fixed;left:50%;transform:translateX(-50%) translateY(160%);
+  bottom:max(18px,env(safe-area-inset-bottom));z-index:9;max-width:min(92vw,460px);
+  padding:12px 15px;border-radius:11px;background:var(--surface);border:1px solid var(--line);
+  box-shadow:var(--shadow-lg);font-size:13px;line-height:1.45;color:var(--fg);
+  transition:transform .24s cubic-bezier(.2,.8,.2,1);
+}
+#toast.show{transform:translateX(-50%) translateY(0)}
+#toast.bad{background:var(--neg-soft);border-color:rgb(185 28 28 / .35);color:var(--negative)}
+@media (prefers-reduced-motion:reduce){#toast{transition:none}}
+</style>
+
+<div class="topbar"><h1>vivary</h1><div id="host">connecting…</div></div>
+<p id="fleet">Loading sandboxes…</p>
+
+<div id="list"></div>
+
+<section>
+  <div class="sec-head"><h2>Devices</h2><button id="refresh">Refresh</button></div>
+  <div id="devs"></div>
+  <form id="enrol">
+    <input id="dname" placeholder="device name — ipad, phone" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <textarea id="dkey" placeholder="ssh-ed25519 AAAA… paste this device's PUBLIC key" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+    <button type="submit">Enrol device</button>
+  </form>
+</section>
+
+<div id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let busy = false;
+// CSRF guard: a cross-origin page cannot set a custom header without a
+// preflight, and the server sends no CORS headers, so the preflight fails.
+const H = { 'x-vivary': '1' };
+
+function toast(msg, bad) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'show' + (bad ? ' bad' : '');
+  clearTimeout(t._t);
+  t._t = setTimeout(() => { t.className = ''; }, 3800);
+}
+
+async function load() {
+  try {
+    const s = await (await fetch('/api/state')).json();
+    $('#host').textContent = s.host || 'tailscale not reporting';
+    const on = s.sandboxes.filter((x) => x.running).length;
+    $('#fleet').innerHTML = `<b>${on}</b> running · ${s.sandboxes.length - on} stopped`;
+    // Running first: the page's job is "what is alive and how do I get in",
+    // and a couple of dozen sandboxes push that below the fold otherwise.
+    const order = [...s.sandboxes].sort((a, b) => (b.running - a.running) || a.name.localeCompare(b.name));
+    $('#list').innerHTML = order.map(card).join('');
+    $('#devs').innerHTML = s.devices.length ? s.devices.map(dev).join('')
+      : '<p class="empty">No devices enrolled. Add this one’s public key and it opens every sandbox.</p>';
+  } catch {
+    toast('Cannot reach vivary on this Mac. Is `vivary web` still running?', true);
+  }
+}
+
+function card(s) {
+  const conn = s.connect.tailnet
+    ? `<button class="ssh" data-copy="${esc(s.connect.tailnet)}"><span>${esc(s.connect.tailnet)}</span>
+       <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>`
+    : `<p class="hint">${esc(s.connect.hint || '')}</p>`;
+  return `<article class="card ${s.running ? 'on' : ''}">
+    <div class="head"><i class="status-dot"></i><div class="name">${esc(s.name)}</div>
+      <div class="state">${s.running ? 'Running' : 'Stopped'}</div></div>
+    <p class="meta">${esc(s.runtime)} · ${esc(s.agent)}${s.memory ? ' · ' + esc(s.memory) : ''}</p>
+    <p class="meta">${esc(s.workspace)}</p>
+    ${s.running ? conn : ''}
+    <button class="act ${s.running ? 'stop' : ''}" data-act="${s.running ? 'down' : 'up'}" data-name="${esc(s.name)}">
+      ${s.running ? 'Stop' : 'Start'}</button>
+  </article>`;
+}
+
+function dev(d) {
+  const p = d.key.split(/\s+/);
+  return `<div class="dev"><div class="dev-name">${esc(d.name)}</div>
+    <div class="dev-key">${esc(p[0])} …${esc(p[1].slice(-12))}</div>
+    <button data-rm="${esc(d.name)}" aria-label="Revoke ${esc(d.name)}">&times;</button></div>`;
+}
+
+async function act(btn) {
+  if (busy) return;
+  busy = true;
+  const { act: a, name } = btn.dataset;
+  btn.disabled = true;
+  btn.textContent = a === 'up' ? 'Starting…' : 'Stopping…';
+  try {
+    const r = await (await fetch(`/api/sandboxes/${encodeURIComponent(name)}/${a}`, { method: 'POST', headers: H })).json();
+    toast(r.ok ? `${a === 'up' ? 'Started' : 'Stopped'} ${name}`
+      : (r.output || r.error || 'Failed').split('\n').pop(), !r.ok);
+  } catch {
+    toast('Lost the connection while working. Refresh to see the real state.', true);
+  }
+  busy = false;
+  await load();
+}
+
+document.addEventListener('click', async (e) => {
+  const copy = e.target.closest('[data-copy]');
+  if (copy) {
+    try { await navigator.clipboard.writeText(copy.dataset.copy); toast('Copied'); }
+    catch {
+      const r = document.createRange(); r.selectNodeContents(copy.querySelector('span'));
+      getSelection().removeAllRanges(); getSelection().addRange(r); toast('Selected — hold to copy');
+    }
+    return;
+  }
+  const a = e.target.closest('[data-act]');
+  if (a) return act(a);
+  const rm = e.target.closest('[data-rm]');
+  if (rm) {
+    if (!confirm(`Revoke ${rm.dataset.rm}? It loses access to every sandbox.`)) return;
+    const r = await (await fetch('/api/devices/' + encodeURIComponent(rm.dataset.rm), { method: 'DELETE', headers: H })).json();
+    toast(r.ok ? `Revoked ${rm.dataset.rm}` : (r.error || 'Failed'), !r.ok);
+    load();
+  }
+  if (e.target.id === 'refresh') load();
+});
+
+$('#enrol').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = $('#dname').value.trim(), key = $('#dkey').value.trim();
+  if (!name || !key) return toast('Name the device and paste its public key.', true);
+  const r = await (await fetch('/api/devices', {
+    method: 'POST', headers: { ...H, 'content-type': 'application/json' }, body: JSON.stringify({ name, key }),
+  })).json();
+  toast(r.ok ? `Enrolled ${name} — it now opens every sandbox` : r.error, !r.ok);
+  if (r.ok) { $('#dname').value = ''; $('#dkey').value = ''; load(); }
+});
+
+load();
+setInterval(() => { if (!busy) load(); }, 15000);
+</script>

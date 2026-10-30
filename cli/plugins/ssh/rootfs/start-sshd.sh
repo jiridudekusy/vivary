@@ -9,6 +9,16 @@ set -euo pipefail
 
 SSH_STATE=/home/agent/host-ssh
 
+# Refresh authorized_keys BEFORE the "already running" guard: `vivary key add`
+# re-runs this script on live sandboxes to enrol a new device, and sshd reads
+# the file per connection, so a new device works immediately with no restart
+# and no dropped sessions.
+if [ -f "$SSH_STATE/authorized_keys" ]; then
+    install -d -m 700 -o agent -g agent /home/agent/.ssh
+    install -m 600 -o agent -g agent "$SSH_STATE/authorized_keys" \
+        /home/agent/.ssh/authorized_keys
+fi
+
 pgrep -x sshd >/dev/null 2>&1 && exit 0
 
 mkdir -p /run/sshd
@@ -20,12 +30,6 @@ else
     ssh-keygen -A
     mkdir -p "$SSH_STATE/hostkeys"
     cp /etc/ssh/ssh_host_* "$SSH_STATE/hostkeys/"
-fi
-
-if [ -f "$SSH_STATE/authorized_keys" ]; then
-    install -d -m 700 -o agent -g agent /home/agent/.ssh
-    install -m 600 -o agent -g agent "$SSH_STATE/authorized_keys" \
-        /home/agent/.ssh/authorized_keys
 fi
 
 /usr/sbin/sshd

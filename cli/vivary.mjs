@@ -9,12 +9,15 @@
 // routes. Agent launchers (slaude, sodex, sursor) dispatch on the binary name.
 import path from 'node:path';
 import { die, migrateLegacyHome, parseArgs, pkg } from './core/util.mjs';
-import { loadPlugins, agentRegistry, pluginCommands, pluginHelp } from './core/plugins.mjs';
+import { loadPlugins, agentRegistry, pluginCommands, pluginFlagDefs, pluginHelp } from './core/plugins.mjs';
 import { cmdBroker } from './core/broker.mjs';
 import { cmdBuild } from './core/build.mjs';
 import {
-  cmdCreate, cmdDown, cmdInit, cmdList, cmdRm, cmdShell, cmdStart, cmdUp,
+  cmdAttach, cmdCreate, cmdDown, cmdExec, cmdInit, cmdList, cmdResume, cmdRm, cmdShell, cmdStart, cmdUp,
 } from './core/lifecycle.mjs';
+import { cmdStats } from './core/stats.mjs';
+import { cmdConfig, cmdProfile } from './core/config-cmd.mjs';
+import { loadMemoryBudget } from './core/config.mjs';
 
 function help(launchers) {
   const launcherLines = Object.entries(launchers)
@@ -35,16 +38,55 @@ Commands:
   init [name]          Write <workspace>/.vivary.json (committable project
                        config: agent, resources, flags, egress policy) from
                        the sandbox's current config and mark it approved.
-  up [name]            Long-running container with sshd — for Claude Desktop
-                       (Code tab -> "+ Add SSH connection"), IDEs, ssh.
-  down [name]          Stop the long-running container.
+  up [name]            Long-running container for something to attach to later.
+                       Needs --ssh and/or --tailscale — with neither there is
+                       no way in but 'vivary shell' on this Mac, so it refuses.
+                       --ssh: Claude Desktop (Code tab -> "+ Add SSH
+                       connection"), IDEs, plain ssh.
+  down [name]          Stop the container (kept, so anything installed inside
+                       survives; 'rm' is what deletes it).
+  resume [--dry-run]   Start every sandbox that was up before the host went
+                       down (i.e. every one 'up' marked and 'down' did not
+                       clear) — run it after a reboot.
+  paseo [name]         Show the Paseo URL and password for a sandbox — what you
+                       type into the app on a phone or tablet.
+  key add <dev> --file <p.pub> | --key "<ssh-...>"
+  key ls | key rm <dev>
+                       Device SSH keys: register a device's PUBLIC key once and
+                       it authorizes EVERY sandbox, present and future — so an
+                       iPad/phone needs ONE key instead of one per container.
+                       Applied to running sandboxes immediately (no restart).
   ide [name]           Open Cursor/VS Code into the sandbox via Remote-SSH
                        (implies 'up' when needed; --editor <bin> to force).
   ls | list            List sandboxes across runtimes.
+  config [name]        The sandbox's settings as its next start resolves them,
+                       each with the layer it came from.
+  profile [ls]         Named profiles (~/.vivary/profiles/<name>.json — same
+  profile show <name>  keys as .vivary.json) and the sandboxes that use them.
+  stats [--trim] [--json]
+                       How hard the VMs press on this Mac: RAM, CPU, swap,
+                       and the kernel tables that have frozen it — open files
+                       above all (virtiofs keeps a host file open for every
+                       file a guest has cached). --trim makes the sandboxes
+                       drop that cache, which releases those files at once.
+                       Exits 2 when something is critical.
   shell [name]         Bash in the sandbox (attaches if running, otherwise
                        starts a container; auto-creates like start).
+  exec [name] [--session <s>] -- <command> [args...]
+                       Run any command in the sandbox (starting it if needed).
+                       On a terminal it runs in a detachable session: answer
+                       its prompts (e.g. a password — never written anywhere),
+                       Ctrl-\ detaches and it keeps running. Without a
+                       terminal it runs through pipes and returns its exit code.
+  attach [name] [session]
+                       Back into a session started by exec (Ctrl-\ again to
+                       detach; quit the program to end it).
   rm [name] [--purge]  Remove the container (--purge also deletes state).
-  build                Build the container image (core + all plugins).
+  build [--pull]       Build the container image (core + all plugins).
+                       --pull re-resolves the ubuntu base, so apt/Node/JDK
+                       layers refresh too; --no-cache rebuilds everything
+                       (slow). Without either, only version-pinned layers
+                       (Claude Code, uu-safe-*) pick up new releases.
                        --runtime tart [--force]: build the macOS base VM
                        (vivary-macos-base) that tart sandboxes clone.
   broker [stop]        Run/stop the host broker (usually automatic).
@@ -57,8 +99,24 @@ Core options (start/create/up/shell):
   --runtime <r>        docker | container | tart — chosen at creation, stored per
                        sandbox (default: $SANDBOX_RUNTIME, else autodetect)
   --agent <a>          Default agent for the sandbox
-  --memory <m>         Container memory (default: $SANDBOX_MEMORY or 4g)
+  --memory <m>         Container memory (default: $SANDBOX_MEMORY or 4g). Sticky.
+                       All running VMs together may be configured for at most
+                       half the Mac's RAM — set "memoryBudget" ("60%", "40g")
+                       in ~/.vivary/vivary.json; a start over it is refused.
+  --ignore-memory-budget
+                       Start this once even if it goes over the budget.
   --cpus <n>           Container CPUs (default: $SANDBOX_CPUS or 4)
+  --profile <p>        Named profile(s), sticky, repeatable: settings from
+                       ~/.vivary/profiles/<p>.json; of several, the last one
+                       listed wins. --profile none clears the list.
+  --ephemeral[=off]    Throw the container away on exit (the pre-persistence
+                       behaviour). Sticky. By default containers are KEPT, so
+                       apt/npm installs, kind, kubectl and docker images inside
+                       survive down/up; only the sandbox state mounts used to.
+  --recreate           Rebuild a kept container from the image once. Needed
+                       after changing flags that are baked in at creation
+                       (env, mounts, caps, memory) — vivary refuses to restart
+                       a container whose settings no longer match and says so.
 
 Plugin options:
 ${pluginHelp()}
@@ -70,15 +128,21 @@ Examples:
   vivary up && ssh claude-sandbox-myproj # ssh into the sandbox
   vivary ls                              # all sandboxes, both runtimes
 
-Project config: <workspace>/.vivary.json (committable; created by 'vivary
-init', changes are reviewed+approved on start). Global defaults (used only
-without a project file): ~/.vivary/vivary.json.
+Settings stack, highest first: the command line > <workspace>/.vivary.json
+(committable; created by 'vivary init', changes are reviewed+approved on
+start) > what was set on the sandbox itself > its profiles > the defaults in
+~/.vivary/vivary.json (used only without a project file). Lists (ports,
+mounts) and "dockerd" add up across layers. Turn an inherited flag off with
+--<flag>=off. 'vivary config' shows where each value came from.
 State lives in ~/.vivary/<name>/ (login, settings, skills, ssh keys).
 Chat history is shared with the host's ~/.claude/projects — visible from
 host Claude Code and vice versa. See README for details.`;
 }
 
 async function main() {
+  // Docker Desktop's CLI appends "What's next: Try Docker Debug…" adverts to
+  // interactive execs — noise in the middle of vivary's own output.
+  process.env.DOCKER_CLI_HINTS ??= 'false';
   migrateLegacyHome();
   await loadPlugins();
   const { launchers } = agentRegistry();
@@ -115,6 +179,9 @@ async function main() {
     case 'up':
       await cmdUp(rest);
       break;
+    case 'resume':
+      await cmdResume(rest);
+      break;
     case 'down':
       cmdDown(rest);
       break;
@@ -122,8 +189,24 @@ async function main() {
     case 'list':
       cmdList();
       break;
+    case 'config':
+      cmdConfig(rest);
+      break;
+    case 'profile':
+    case 'profiles':
+      cmdProfile(rest);
+      break;
+    case 'stats':
+      cmdStats(rest, { loadGlobalBudget: () => loadMemoryBudget(pluginFlagDefs()) });
+      break;
     case 'shell':
       await cmdShell(rest);
+      break;
+    case 'exec':
+      await cmdExec(rest);
+      break;
+    case 'attach':
+      cmdAttach(rest);
       break;
     case 'rm':
       await cmdRm(rest);

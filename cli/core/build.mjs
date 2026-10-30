@@ -103,7 +103,18 @@ export function collectBuildArgs(plugins = getPlugins()) {
 }
 
 export function cmdBuild(argv = []) {
-  const { flags } = parseArgs(argv, { runtime: 'string', force: 'boolean' });
+  const { flags } = parseArgs(argv, {
+    runtime: 'string', force: 'boolean', pull: 'boolean', 'no-cache': 'boolean',
+  });
+  // Without one of these a rebuild refreshes almost nothing: the plugin build
+  // args bust only the layers that depend on them (Claude Code, the uu-safe
+  // family), while the base image and every apt/Node/JDK/Gradle layer stay in
+  // cache forever. --pull re-resolves ubuntu:24.04, which busts everything
+  // below it when the base moved; --no-cache rebuilds the lot (slow — it
+  // re-downloads the Playwright Chromium).
+  const refresh = [];
+  if (flags.pull) refresh.push('--pull');
+  if (flags['no-cache']) refresh.push('--no-cache');
   if (flags.runtime === 'tart') return buildMacosBase({ force: flags.force });
   const runtime = detectRuntime();
   console.log(`==> Using runtime: ${runtime}`);
@@ -121,7 +132,7 @@ export function cmdBuild(argv = []) {
     // Force a native `container build` with SANDBOX_NATIVE_BUILD=1.
     if (runtime === 'container' && process.env.SANDBOX_NATIVE_BUILD !== '1' && hasCmd('docker')) {
       console.log(`==> Building ${IMAGE} with Docker, then loading into the container store`);
-      if (runInherit('docker', ['build', ...buildArgs, '-t', IMAGE, context]) !== 0) die('docker build failed');
+      if (runInherit('docker', ['build', ...refresh, ...buildArgs, '-t', IMAGE, context]) !== 0) die('docker build failed');
       const tar = path.join(os.tmpdir(), `${IMAGE}-${Date.now()}.tar`);
       try {
         if (runInherit('docker', ['save', `${IMAGE}:latest`, '-o', tar]) !== 0) die('docker save failed');
@@ -131,7 +142,7 @@ export function cmdBuild(argv = []) {
       }
     } else {
       console.log(`==> Building ${IMAGE}`);
-      if (runInherit(runtime, ['build', ...buildArgs, '-t', IMAGE, context]) !== 0) die(`${runtime} build failed`);
+      if (runInherit(runtime, ['build', ...refresh, ...buildArgs, '-t', IMAGE, context]) !== 0) die(`${runtime} build failed`);
     }
   } finally {
     fs.rmSync(context, { recursive: true, force: true });

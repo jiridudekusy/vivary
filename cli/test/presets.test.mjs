@@ -15,6 +15,10 @@ test('expandPresets dies loudly on an unknown preset name', () => {
     /unknown egress preset 'anthropc'.*anthropic/);
 });
 
-test('built-in presets are anthropic, openai, cursor', () => {
-  assert.deepEqual(Object.keys(PRESETS).sort(), ['anthropic', 'cursor', 'openai']);
+test('built-in presets are the three agent APIs plus uunpm', () => {
+  assert.deepEqual(Object.keys(PRESETS).sort(), ['anthropic', 'cursor', 'openai', 'uunpm']);
+});
+
+test('the uunpm preset opens only the malicious-package list, not a registry', () => {
+  assert.deepEqual(PRESETS.uunpm, ['docs.plus4u.net/*']);
 });

@@ -260,6 +260,10 @@ export function makeTartRuntime({
     // The VM disk IS the sandbox state (in-guest logins, chats) — plain rm
     // keeps it; purge deletes it. Lifecycle prints the kind-aware message.
     rm() { return { status: 0 }; },
+    // A tart VM is persistent by nature (its disk image survives `tart stop`),
+    // so the container-persistence branch in the lifecycle never applies here.
+    exists() { return false; },
+    start() { return { status: 1, stderr: 'tart: use run' }; },
     purge(vm) { return capture('tart', ['delete', vm]); },
     isRunning(sandboxName) { return listLocalVms(capture).get(tartVmName(sandboxName))?.running === true; },
     runningSet() {

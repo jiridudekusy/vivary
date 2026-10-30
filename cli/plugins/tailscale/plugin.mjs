@@ -13,16 +13,41 @@
 // (container IPs are host-internal).
 import fs from 'node:fs';
 import path from 'node:path';
-import { capture, hasCmd } from '../../core/util.mjs';
+import { capture, hasCmd, hostPortFree } from '../../core/util.mjs';
 import { assignStablePort } from '../../core/sandbox.mjs';
 
-function tailscaleBin() {
+export function tailscaleBin() {
   if (hasCmd('tailscale')) return 'tailscale';
   const app = '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
   return fs.existsSync(app) ? app : null;
 }
 
-function tailscaleStatus() {
+// Ports `tailscale serve` already exposes on this host's tailnet address. The
+// host-side probe (hostPortFree) cannot see them — the macOS extension does not
+// bind them locally — which is how a sandbox was once given the port of the
+// user's own Paseo share and shadowed it. Anything that picks a tailnet port
+// must skip these. Pure parsing is split out for tests.
+export function parseServePorts(json) {
+  try {
+    return new Set(Object.keys(JSON.parse(json || '{}').TCP || {}).map(Number));
+  } catch {
+    return new Set();
+  }
+}
+
+export function tailnetServePorts(run = capture) {
+  const bin = tailscaleBin();
+  if (!bin) return new Set();
+  const r = run(bin, ['serve', 'status', '--json']);
+  return r.status === 0 ? parseServePorts(r.stdout) : new Set();
+}
+
+// isFree for assignStablePort when the port is published on the tailnet.
+export function tailnetPortFree(serve = tailnetServePorts(), hostFree = hostPortFree) {
+  return async (port) => !serve.has(port) && hostFree(port);
+}
+
+export function tailscaleStatus() {
   const bin = tailscaleBin();
   if (!bin) return null;
   const r = capture(bin, ['status', '--json']);
