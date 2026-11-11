@@ -13,6 +13,10 @@
 // Deliberately NOT offered: creating a sandbox. A workspace path is a raw host
 // mount, so "create" from a phone would be an arbitrary-host-directory mount
 // behind whatever reaches the tailnet. Creation stays on the Mac.
+//
+// Login is a passkey (auth.mjs). The loopback bind and the tailnet allowlist
+// stay as outer gates, but neither is trusted on its own any more: a
+// docker-runtime sandbox reaches the host's loopback via host.docker.internal.
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -23,6 +27,7 @@ import { listSandboxNames, loadSandbox, sandboxDir } from '../../core/sandbox.mj
 import { resolveRuntime } from '../../core/runtimes/index.mjs';
 
 import { deviceFile, listDevices, parsePublicKey } from '../ssh/devices.mjs';
+import { HttpError } from './auth.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const WEB_PORT = Number(process.env.VIVARY_WEB_PORT || 7378);
@@ -153,32 +158,52 @@ export function resolveAllowedLogins(cfgAllow, run = capture) {
   }
 }
 
-// Returns null when allowed, or a { status, error } to send back.
-export function authorize(req, allowed) {
+// The outer gates, checked before the session: the tailnet login (when serve
+// fronts us) must be on the allowlist, and anything that changes state must
+// come from our own page — a custom header (a cross-origin page cannot set one
+// without a CORS preflight, which fails: no CORS headers are ever sent), a
+// same-origin Sec-Fetch-Site, and an Origin equal to the one passkeys are
+// bound to. Throws HttpError.
+export function outerGate(req, allowed, origin) {
   const who = req.headers['tailscale-user-login'];
   if (who && !allowed.includes(String(who).toLowerCase())) {
-    return { status: 403, error: `${who} is not allowed to manage this vivary` };
+    throw new HttpError(403, `${who} is not allowed to manage this vivary`);
   }
-  // CSRF: a page on another origin can fire a plain POST at this tailnet URL
-  // without being able to read the reply — enough to start or stop a sandbox.
-  // A custom header cannot be set cross-origin without a preflight, and no CORS
-  // headers are sent, so the preflight fails. Same job as the wrapper's CSRF
-  // token, without a session to hang it on.
-  if (req.method !== 'GET') {
-    if (req.headers['x-vivary'] !== '1') {
-      return { status: 403, error: 'missing X-Vivary header (cross-origin request?)' };
-    }
-    const site = req.headers['sec-fetch-site'];
-    if (site && site !== 'same-origin' && site !== 'none') {
-      return { status: 403, error: `cross-site request refused (${site})` };
-    }
+  if (req.method === 'GET' || req.method === 'HEAD') return;
+  if (req.headers['x-vivary'] !== '1') {
+    throw new HttpError(403, 'missing X-Vivary header (cross-origin request?)');
   }
-  return null;
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') {
+    throw new HttpError(403, `cross-site request refused (${site})`);
+  }
+  if (req.headers.origin !== origin) {
+    throw new HttpError(403, `wrong origin ${req.headers.origin || '(none)'} — open ${origin}`);
+  }
 }
 
-const json = (res, status, body) => {
+// On every response. The page loads only its own files (no inline script, so
+// an injected <script> does not run), cannot be framed, leaks no referrer.
+const SECURITY_HEADERS = {
+  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+    + "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'cross-origin-opener-policy': 'same-origin',
+  'x-frame-options': 'DENY',
+  'cache-control': 'no-store',
+};
+
+// The page's own files: a fixed list, never a path from the request.
+const ASSETS = {
+  '/assets/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  '/assets/webauthn.js': ['webauthn.js', 'text/javascript; charset=utf-8'],
+  '/assets/app.css': ['app.css', 'text/css; charset=utf-8'],
+};
+
+const json = (res, status, body, headers = {}) => {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
   res.end(payload);
 };
 
@@ -201,7 +226,10 @@ function knownSandbox(name) {
   return listSandboxNames().includes(name) ? name : null;
 }
 
-export function createServer({ allow } = {}) {
+export function createServer({
+  allow, auth, run = runVivary, fqdn = selfTailnetFqdn, log = (m) => console.log(`[web] ${m}`),
+} = {}) {
+  if (!auth) throw new Error('createServer needs auth (see auth.mjs)');
   // Resolved once per request but cached briefly — `tailscale status` is a
   // subprocess and the UI polls.
   let cached = null;
@@ -215,24 +243,22 @@ export function createServer({ allow } = {}) {
   };
 
   return http.createServer(async (req, res) => {
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
-    // Identity, when tailscale serve fronts us. Not an auth gate (the loopback
-    // bind is), but it is what the audit line records and what the UI greets.
-    const who = req.headers['tailscale-user-login'] || null;
+    // Who tailscale serve says it is (it overwrites any such header a client
+    // sends). Recorded in the audit lines; the passkey is what authorizes.
+    const who = req.headers['tailscale-user-login'] || 'local';
 
     try {
-      if (p.startsWith('/api/')) {
-        const denial = authorize(req, allowedLogins());
-        if (denial) {
-          console.error(`[web] DENIED ${who || 'local'} ${req.method} ${p}: ${denial.error}`);
-          return json(res, denial.status, { ok: false, error: denial.error });
-        }
-      }
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
-        const html = fs.readFileSync(path.join(HERE, 'ui.html'));
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        return res.end(html);
+        return res.end(fs.readFileSync(path.join(HERE, 'ui.html')));
+      }
+      if (req.method === 'GET' && ASSETS[p]) {
+        const [file, type] = ASSETS[p];
+        res.writeHead(200, { 'content-type': type });
+        return res.end(fs.readFileSync(path.join(HERE, 'assets', file)));
       }
 
       // Self-hosted Roboto / Roboto Mono, same files the approval-mcp-wrapper UI
@@ -249,12 +275,28 @@ export function createServer({ allow } = {}) {
         return res.end(fs.readFileSync(file));
       }
 
+      if (!p.startsWith('/api/')) return json(res, 404, { ok: false, error: 'not found' });
+
+      outerGate(req, allowedLogins(), auth.origin);
+      const body = req.method === 'GET' ? {} : parseJson(await readBody(req));
+
+      if (p.startsWith('/api/auth/')) {
+        const r = await auth.route(req, p, body);
+        if (r) return json(res, r.status, r.body, r.cookie ? { 'set-cookie': r.cookie } : {});
+        return json(res, 404, { ok: false, error: 'not found' });
+      }
+
+      // Everything else: a logged-in session, and its CSRF token for changes.
+      const session = auth.sessionFor(req);
+      if (!session) return json(res, 401, { ok: false, error: 'not logged in' });
+      if (req.method !== 'GET') auth.checkCsrf(req, session);
+
       if (req.method === 'GET' && p === '/api/state') {
-        const fqdn = selfTailnetFqdn();
+        const host = fqdn();
         return json(res, 200, {
-          host: fqdn,
+          host,
           who,
-          sandboxes: sandboxList(fqdn),
+          sandboxes: sandboxList(host),
           devices: listDevices().map((d) => ({ name: d.name, key: d.key })),
         });
       }
@@ -263,29 +305,32 @@ export function createServer({ allow } = {}) {
       if (req.method === 'POST' && action) {
         const name = knownSandbox(decodeURIComponent(action[1]));
         if (!name) return json(res, 404, { ok: false, error: 'unknown sandbox' });
-        console.log(`[web] ${who || 'local'} -> ${action[2]} ${name}`);
-        const r = await runVivary([action[2], '--name', name]);
+        log(`${who} -> ${action[2]} ${name}`);
+        const r = await run([action[2], '--name', name]);
         return json(res, r.ok ? 200 : 500, r);
       }
 
       if (req.method === 'POST' && p === '/api/devices') {
-        const body = JSON.parse(await readBody(req) || '{}');
-        const name = String(body.name || '').trim();
+        const name = String(body.name ?? '').trim();
+        const rawKey = String(body.key ?? '');
         if (!/^[a-z0-9][a-z0-9-]{0,31}$/i.test(name)) {
           return json(res, 400, { ok: false, error: 'name must be 1-32 chars: letters, digits, dashes' });
         }
         let key;
         try {
-          key = parsePublicKey(body.key);
+          key = parsePublicKey(rawKey);
         } catch (e) {
           return json(res, 400, { ok: false, error: e.message });
         }
+        // A device key opens every sandbox: it needs a fresh passkey touch made
+        // for exactly this name and key.
+        await auth.consumeStepUp(session, 'device-add', { name, key: rawKey }, body.stepUp);
         fs.mkdirSync(path.dirname(deviceFile(name)), { recursive: true });
         fs.writeFileSync(deviceFile(name), `${key}\n`, { mode: 0o644 });
-        console.log(`[web] ${who || 'local'} -> enrolled device ${name}`);
+        log(`${who} -> enrolled device ${name}`);
         // Pushing to live sandboxes is the CLI's job, so reuse it rather than
         // duplicating the pgrep/cmp logic that makes the push honest.
-        const r = await runVivary(['key', 'add', name, '--key', key], 120000);
+        const r = await run(['key', 'add', name, '--key', key], 120000);
         return json(res, 200, { ok: true, output: r.output });
       }
 
@@ -294,14 +339,28 @@ export function createServer({ allow } = {}) {
         if (!listDevices().some((d) => d.name === name)) {
           return json(res, 404, { ok: false, error: 'unknown device' });
         }
-        const r = await runVivary(['key', 'rm', name], 120000);
-        console.log(`[web] ${who || 'local'} -> revoked device ${name}`);
+        const r = await run(['key', 'rm', name], 120000);
+        log(`${who} -> revoked device ${name}`);
         return json(res, 200, { ok: true, output: r.output });
       }
 
       return json(res, 404, { ok: false, error: 'not found' });
     } catch (e) {
+      if (e instanceof HttpError) {
+        if (e.status === 403) log(`DENIED ${who} ${req.method} ${p}: ${e.message}`);
+        return json(res, e.status, { ok: false, error: e.message });
+      }
       return json(res, 500, { ok: false, error: e?.message || String(e) });
     }
   });
+}
+
+function parseJson(text) {
+  if (!text) return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    throw new HttpError(400, 'body is not JSON');
+  }
 }

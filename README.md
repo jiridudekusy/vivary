@@ -15,6 +15,7 @@ slaude               # sandboxed Claude Code for this project. That's it.
 ## Install
 
 ```bash
+npm install --prefix cli     # the CLI's one dependency (passkeys for `vivary web`)
 vivary build                 # compose + build the image
 npm install -g ./cli         # installs the `vivary`, `slaude`, `sodex` and `sursor` commands
 ```
@@ -342,6 +343,42 @@ Desktop injects its own client-side connectors (e.g. Claude in Chrome) that
 execute **on the host** — disable them in Desktop settings if you want the
 session fully contained. Plain CLI sessions (`slaude`, `vivary start`) have no
 host-side channel at all.
+
+## Web UI (`vivary web`)
+
+A phone-sized page for the sandboxes on this Mac: what runs, how to connect,
+start/stop, and the SSH device keys (`vivary key`). It listens on loopback only
+and is shared to your tailnet with `tailscale serve --https` (HTTPS
+certificates must be enabled in the Tailscale admin console).
+
+```bash
+vivary web                   # serves https://<mac>.<tailnet>.ts.net:8737/
+vivary web enroll            # (another terminal, on the Mac) register a passkey
+vivary web --stop            # stop sharing to the tailnet
+```
+
+Login is a **passkey** (Face ID / Touch ID / PIN, always with user
+verification). Passkeys need a secure context, so HTTPS on the tailnet name —
+plain HTTP works only on `localhost` (`--no-serve`, which then has passkeys of
+its own). A passkey belongs to one address: use the `ts.net` one on the Mac too.
+
+- **First passkey, and recovery:** only `vivary web enroll` on the Mac. It opens
+  the page with a one-time token in the URL fragment (one use, 10 minutes) and
+  prints nothing. With iCloud Keychain the passkey reaches your iPhone and iPad.
+  There are no recovery codes: physical access to the Mac is the way back in.
+- **Sessions:** 12 h, `__Host-` cookie (HttpOnly, Secure, SameSite=Strict),
+  CSRF token on every change, in memory only — restarting `vivary web` signs
+  everyone out. "Sign out everywhere" in the page does the same.
+- **Step-up:** adding an SSH device key and adding or removing a passkey ask for
+  a fresh passkey touch, bound to that exact request (a touch for one key cannot
+  be spent on another).
+- Every API call needs a session, loopback included — a docker-runtime sandbox
+  can reach the host's loopback through `host.docker.internal`. The tailnet
+  allowlist (`~/.vivary/web-allow`, default: the tailnet owner) still applies on
+  top. Stored in `~/.vivary/.web/`: public keys and the hash of a pending
+  enrollment token — no secret.
+- Not offered from the web: creating a sandbox, changing its workspace or
+  mounts (raw access to the Mac's disk).
 
 ## Security boundary
 

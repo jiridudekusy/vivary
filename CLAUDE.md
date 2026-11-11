@@ -137,6 +137,26 @@ English, converse with the user in Czech.
   ASHP transparent MITM proxy (`ashp.mjs`, lazy-started like the broker; state
   in `~/.vivary/.ashp/`); default-deny + per-request approval UI
   (`vivary egress status|stop|logs`).
+- web plugin (`vivary web`, order 95): loopback :7378 + `tailscale serve
+  --https=8737`, login by PASSKEY (`plugins/web/auth.mjs`, @simplewebauthn/server
+  — the CLI's first dependency, imported lazily so other commands run without
+  it). WebAuthn needs a secure context: HTTPS, or plain http only on
+  `localhost` (`--no-serve`, separate passkeys — a passkey is bound to the
+  host name, so the page has ONE address). First passkey + recovery ONLY via
+  `vivary web enroll` on the Mac: hash of a one-time token in
+  `~/.vivary/.web/enroll.json`, token in the URL fragment of the page it
+  `open`s, never printed; no recovery codes (user's choice). Sessions in
+  memory only (restart = everyone signed out), `__Host-` cookie, CSRF token,
+  Origin must equal the passkey origin. EVERY api call needs a session, loopback
+  included: the old "no Tailscale header = owner on the Mac" rule is gone,
+  because a docker-runtime sandbox reaches host loopback via
+  host.docker.internal and can send any header there. Step-up (device-add,
+  passkey-add/-remove) stores a digest of the exact request with the challenge
+  — a touch cannot be spent on another key. Strict CSP: no inline script/style
+  (ui.html + assets/app.js|app.css|webauthn.js). Tests drive the real server
+  with a software authenticator (real P-256/CBOR, `test/web-auth.test.mjs`).
+  Plan for the rest (VNC through the web, settings, vault):
+  docs/design/2026-11-11-security-model-alignment.md §7.
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).
