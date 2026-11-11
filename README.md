@@ -5,7 +5,8 @@
 Run AI coding agents (Claude Code, Codex, Cursor) in isolated containers — **Docker**
 or **Apple `container`** — while keeping host-level convenience: shared chat
 history, one-time login, imported settings/skills/MCP, a browser the agent can
-drive (headless or visible via noVNC), and SSH access for Claude Desktop.
+drive (headless, or watched and driven in the passkey-protected web UI), and SSH
+access for Claude Desktop.
 
 ```bash
 cd ~/work/myproj
@@ -58,8 +59,7 @@ Agent launchers (equivalent to `vivary start --agent ... -- args`):
 
 Common options: `--sudo` (full root in the sandbox), `--headed`, `--docker`, `--memory 8g`, `--cpus 6`, `--runtime
 docker|container`, `--name`, `--workspace`, `--agent`. Environment defaults:
-`SANDBOX_RUNTIME`, `SANDBOX_MEMORY`, `SANDBOX_CPUS`, `SANDBOXES_DIR`,
-`NOVNC_PORT`, `SSH_PORT`.
+`SANDBOX_RUNTIME`, `SANDBOX_MEMORY`, `SANDBOX_CPUS`, `SANDBOXES_DIR`, `SSH_PORT`.
 
 **Runtime selection**: chosen when the sandbox is created (`--runtime`, else
 `$SANDBOX_RUNTIME`, else autodetect — `container` wins if installed) and
@@ -140,15 +140,16 @@ core Dockerfile plus every plugin fragment — Ubuntu 24.04 with:
 | Java | Azul Zulu JDK 21 |
 | Build tools | Maven (apt), Gradle 8.14 |
 | Playwright | latest, global npm install, Chromium pre-installed (`/opt/pw-browsers`, agent-writable so projects can `npx playwright install`) |
-| GUI stack | Xvfb + openbox + x11vnc + noVNC (headed browser mode) |
+| GUI stack | Xvfb + openbox + x11vnc on the sandbox's loopback (headed browser mode) |
 | sshd | key-only, user `agent` (for Claude Desktop / IDE access) |
 
 Browser modes:
 
 - **Headless** (default): Playwright works out of the box.
-- **Headed**: `--headed` starts Xvfb (`:99`) + noVNC — watch and control the
-  browser from the host (URL is printed on start; run agent code with
-  `headless: false`).
+- **Headed**: `--headed` starts Xvfb (`:99`) + x11vnc — watch and control the
+  browser in `vivary web` (the address is printed on start, again with
+  `vivary headed <name>`; run agent code with `headless: false`). VNC is never
+  on the network: see *Screens* under the web UI.
 
 One image serves all agents — Claude can call Codex (`codex exec ...`) and
 vice versa within the same sandbox.
@@ -379,6 +380,24 @@ its own). A passkey belongs to one address: use the `ts.net` one on the Mac too.
   enrollment token — no secret.
 - Not offered from the web: creating a sandbox, changing its workspace or
   mounts (raw access to the Mac's disk).
+
+**Screens** (`--headed` sandboxes): *Open screen* on a running sandbox's card,
+or `https://<mac>.<tailnet>.ts.net:8737/vnc/<name>`. The viewer is noVNC's
+client library (npm `@novnc/novnc`, pinned), served by the web from the Mac;
+on a phone it has a keyboard button plus Esc/Tab/Ctrl and a text box that types
+into the sandbox or puts text on its clipboard. The way in is the same session:
+
+- x11vnc listens on the sandbox's `127.0.0.1` only, without a password. The
+  web runs `container exec -i <container> vnc-relay` (or `docker exec`) per
+  viewer and carries the VNC stream over the runtime's exec channel. Nothing
+  listens on any network for VNC, so another sandbox has nothing to connect
+  to, and there is no password or token to store, print or leak.
+- The WebSocket needs the session cookie and the web's own `Origin`; a screen
+  closes within seconds of sign-out, "sign out everywhere", removal of its
+  passkey or the 12 h limit.
+- Needs the current image: a container made before this still serves noVNC
+  on its network with the old 8-character password. `vivary up <name>` says
+  so; `vivary up <name> --recreate` moves it over.
 
 ## Security boundary
 

@@ -155,8 +155,8 @@ English, converse with the user in Czech.
   — a touch cannot be spent on another key. Strict CSP: no inline script/style
   (ui.html + assets/app.js|app.css|webauthn.js). Tests drive the real server
   with a software authenticator (real P-256/CBOR, `test/web-auth.test.mjs`).
-  Plan for the rest (VNC through the web, settings, vault):
-  docs/design/2026-11-11-security-model-alignment.md §7.
+  Screens of headed sandboxes: /vnc/<name> (see headed below). Plan for the
+  rest (settings, vault): docs/design/2026-11-11-security-model-alignment.md §7.
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).
@@ -462,39 +462,47 @@ English, converse with the user in Czech.
   CAP_SYS_ADMIN (bind-modules runs it once per boot; node-modules sandboxes
   have caps ALL). A volume can be attached to ONE container at a time ("The
   storage device attachment is invalid").
-- headed (noVNC): STICKY, and password-protected — it used to be
-  per-invocation (so `create --headed` was forgotten) and served VNC with
-  `-nopw` on 0.0.0.0, which another sandbox could open (verified: agent-sandbox
-  reached findmy's VNC while that browser held an iCloud login). Now a
-  per-sandbox password (~/.vivary/<name>/vnc-password, 8 chars — VNC's limit)
-  goes in via VIVARY_VNC_PASSWORD, x11vnc listens on localhost only. vivary
-  NEVER PRINTS A PASSWORD (user's rule, 2026-10-18) — only the file holding it
-  (`password: in ~/.vivary/<name>/vnc-password`; `vivary paseo` likewise names
-  dot-paseo/.vivary-password): its output lands in scrollback and in the
-  transcripts of agents that run vivary commands. Never in the URL or on the
-  clipboard either: a URL lands in synced browser history, and the Mac
-  clipboard is synced into every --clipboard sandbox — i.e. to other agents.
-  noVNC prompts for it. (The sandbox's own agent can read it from PID 1's
-  environment; harmless — it drives that browser anyway.)
-  With --tailscale it is ALSO shared on the tailnet like Paseo: `tailscale
-  serve --https=<tsNovncPort>` -> 127.0.0.1:<novncPort> (HTTPS with the
-  tailnet's cert, wss works through serve; verified by reading the RFB greeting
-  over wss on both runtimes). serve cannot target the container network — the
-  macOS extension refuses "remote destinations from non-default route" — so
-  Apple `container` then needs the loopback publish too, which makes headed
-  part of its snapshot there. Tailnet ports skip what `tailscale serve`
-  already uses (`tailnetServePorts`; hostPortFree cannot see them — that is how
-  a sandbox once shadowed the user's own Paseo share); Paseo uses it too. On Apple
-  `container` postUp starts the stack LIVE (`exec setsid -w start-gui`), so a
-  kept container needs no --recreate (flag def `snapshot: false`); on docker
-  the noVNC publish (stable `novncPort`, 127.0.0.1 — it was a fixed 6080 on
-  every interface) is baked, so there `headed` IS in the snapshot. Traps found:
-  x11vnc started via `container exec` lives in another IPC namespace than a
-  boot-time Xvfb -> MIT-SHM "BadAccess ... X_ShmAttach" -> needs `-noshm`;
-  `pgrep -f openbox` matched any shell mentioning it, so the stack silently did
-  not start -> match by process name (`pgrep -x`); start-gui must wait for the
-  display whoever started it (boot hooks race a live start) and for noVNC
-  before returning; a wedged passwordless x11vnc ignored SIGTERM -> SIGKILL.
+- headed: STICKY; the screen is viewed ONLY through `vivary web` (passkey),
+  2026-11-11. History: first served VNC with `-nopw` on 0.0.0.0 (verified:
+  agent-sandbox reached findmy's VNC while that browser held an iCloud login),
+  then behind VNC's own password (8 chars max, a plaintext file on the Mac) on
+  noVNC :6080 plus a per-sandbox tailnet share. Now x11vnc listens on the
+  sandbox's 127.0.0.1 only, WITHOUT a password, and nothing VNC-related listens
+  on any network (no noVNC/websockify in the image). Per viewer the web runs
+  `<runtime> exec -i <container> vnc-relay` (python, stdin/stdout <->
+  127.0.0.1:5900) and carries RFB over the runtime's exec channel
+  (web/vnc.mjs, `ws` server, WebSocket at /api/vnc/<name> gated by Origin +
+  session + allowlist; a sweep closes screens whose session ended). Measured:
+  ~0.4 s to connect, ~15 ms per round trip on both runtimes; a closed viewer
+  leaves no process (stdin EOF ends the relay; docker keeps an exec'd process
+  when only the client dies, so EOF is what matters, SIGKILL is the backstop).
+  WHY NOT the planned websockify secret + in-sandbox firewall: the default
+  capability set of both runtimes lacks CAP_NET_ADMIN (checked: Apple's
+  bounding set), so iptables would need a cap for every headed sandbox; the exec
+  channel needs no port, no token, no firewall. The viewer page and noVNC's
+  client (npm @novnc/novnc, pinned, ESM, `core/` + `vendor/` only, served file
+  by file from cli/node_modules) come from the Mac — NEVER from the sandbox: a
+  script a sandbox can rewrite, run on the web's origin, would drive the API
+  with the user's session. noVNC core runs under the strict CSP (JS-set styles
+  are CSSOM, allowed; JPEG rects are data: images); connect-src names the
+  wss:// origin explicitly (older Safari did not count ws under 'self').
+  postUp records `vncRelay: true` in sandbox.json when the stack is up in a
+  container that has vnc-relay; the web reads that instead of re-resolving
+  profiles/.vivary.json (effectiveSandbox may die() on an unapproved change,
+  which would kill the web server). A container from an older image (no
+  vnc-relay) gets a loud "--recreate" warning and keeps its old stack (and its
+  password file) until then; findmy (docker) is one — its snapshot recorded
+  `headed`, which containerSnapshot now ECHOES back so that alone does not
+  refuse it. vivary NEVER PRINTS A PASSWORD (user's rule, 2026-10-18; `vivary
+  paseo` names dot-paseo/.vivary-password instead): output lands in scrollback
+  and in agents' transcripts; never in a URL (synced history) or on the
+  clipboard (synced into every --clipboard sandbox). Traps found: x11vnc
+  started via `container exec` lives in another IPC namespace than a boot-time
+  Xvfb -> MIT-SHM "BadAccess ... X_ShmAttach" -> needs `-noshm`; `pgrep -f
+  openbox` matched any shell mentioning it, so the stack silently did not start
+  -> match by process name (`pgrep -x`); start-gui must wait for the display
+  whoever started it (boot hooks race a live start); a wedged x11vnc ignored
+  SIGTERM -> SIGKILL.
 - `vivary exec <sb> [--session s] -- <cmd>` / `vivary attach <sb> [s]`: any
   command in a sandbox (started if needed). On a TTY it runs under `dtach`
   (core image, late layer): answer its prompt — a password that must not be
@@ -617,8 +625,6 @@ English, converse with the user in Czech.
 
 ## Roadmap / open items
 
-- noVNC publish for tailscale plugin (iPad browser access under Apple
-  container — currently prints container-DNS URL that only works locally).
 - `vivary key-add <name>` — append a client pubkey to authorized_keys +
   restart sshd (asked for iPad/iPhone access).
 - Remote broker for headless-server topology (host-open/clipboard should

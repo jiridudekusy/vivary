@@ -9,9 +9,10 @@ import { WEB_PORT, createServer, selfTailnetFqdn } from './server.mjs';
 import {
   ENROLL_TTL_MS, clearServerInfo, createAuth, createEnrollToken, readServerInfo, webauthnLib, writeServerInfo,
 } from './auth.mjs';
+import { wsLib } from './vnc.mjs';
 
 const TAILSCALE_BIN = '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
-const DEFAULT_TAILNET_PORT = 8737;
+export const DEFAULT_TAILNET_PORT = 8737;
 
 function tailscaleBin() {
   return fs.existsSync(TAILSCALE_BIN) ? TAILSCALE_BIN : 'tailscale';
@@ -68,8 +69,10 @@ export async function cmdWeb(argv = []) {
     return;
   }
 
+  let ws;
   try {
     await webauthnLib();
+    ws = await wsLib();
   } catch (e) {
     die(e.message);
   }
@@ -88,7 +91,7 @@ export async function cmdWeb(argv = []) {
   // Allowlist of tailnet logins. Kept OUT of vivary.json on purpose: that file
   // is agent-writable and sits behind the approval gate, and an agent must not
   // be able to propose who may drive the management UI.
-  const server = createServer({ allow: readAllowFile(flags.allow), auth });
+  const server = createServer({ allow: readAllowFile(flags.allow), auth, ws });
   server.on('error', (e) => die(`vivary web failed to start: ${e.message}`));
   // LOOPBACK ONLY: an Apple `container` guest cannot reach the host's
   // 127.0.0.1; tailscale serve is what makes it reachable from a phone.

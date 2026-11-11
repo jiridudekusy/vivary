@@ -1,0 +1,74 @@
+/* vivary web — a sandbox's screen. Served as a file: the CSP allows no inline
+   style. Dark only: a screen is easier to read on a dark frame. */
+@font-face{font-family:Roboto;src:url('/assets/fonts/latin-ext-normal.woff2') format('woff2');
+  font-style:normal;font-weight:100 900;font-display:swap}
+
+:root{
+  color-scheme:dark;
+  --primary:#60a5fa; --negative:#f87171; --positive:#4ade80;
+  --surface:#121a28; --ground:#0b111b; --fg:#dce5f1; --fg-strong:#f8fafc;
+  --muted:#8fa0b7; --line:#2b394c;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--ground);color:var(--fg);
+  font:400 14px/1.4 Roboto,Arial,sans-serif;-webkit-text-size-adjust:100%;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+button,textarea{font:inherit;color:inherit}
+
+#bar{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left));
+  background:var(--surface);border-bottom:1px solid var(--line);
+}
+#back{color:var(--fg);text-decoration:none;font-size:26px;line-height:1;padding:0 4px}
+#title{display:flex;flex-direction:column;min-width:0;flex:1 1 120px}
+#name{color:var(--fg-strong);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#status{color:var(--muted);font-size:12px}
+#status.bad{color:var(--negative)}
+#status.ok{color:var(--positive)}
+#tools{display:flex;gap:6px;flex-wrap:wrap}
+#tools button,dialog button{
+  background:transparent;border:1px solid var(--line);border-radius:8px;
+  padding:6px 10px;min-height:34px;cursor:pointer;
+}
+#tools button[aria-pressed="true"]{background:var(--primary);border-color:var(--primary);color:#0b111b}
+button.primary{background:var(--primary)!important;border-color:var(--primary)!important;color:#0b111b!important;font-weight:600}
+button:disabled{opacity:.5}
+
+#screen{flex:1;min-height:0;position:relative;background:#000}
+#msg{
+  position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  max-width:min(520px,calc(100% - 32px));padding:16px 18px;border-radius:12px;
+  background:var(--surface);border:1px solid var(--line);white-space:pre-line;
+}
+#msg code{font-family:'Roboto Mono',monospace;color:var(--fg-strong)}
+
+/* Off-screen but focusable: iOS shows its keyboard only for a real input. */
+#kbd-input{
+  position:fixed;left:-1000px;top:0;width:10px;height:10px;opacity:0;
+  font-size:16px; /* below 16px iOS zooms the page on focus */
+}
+
+dialog{
+  background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:14px;
+  width:min(520px,calc(100% - 24px));padding:16px;
+}
+dialog::backdrop{background:rgb(0 0 0 / .55)}
+dialog h2{margin:0 0 10px;font-size:16px;color:var(--fg-strong)}
+dialog textarea{
+  width:100%;background:var(--ground);border:1px solid var(--line);border-radius:8px;
+  padding:8px;font-size:16px;resize:vertical;
+}
+dialog .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+#from-sbx{margin-top:14px;padding-top:10px;border-top:1px solid var(--line)}
+#from-sbx p{margin:0 0 8px;color:var(--muted)}
+
+/* A phone: one scrolling row of keys under the name, so the screen keeps its height. */
+@media (max-width:600px){
+  #tools{flex:1 0 100%;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  #tools::-webkit-scrollbar{display:none}
+  #tools button{flex:none;padding:5px 9px;min-height:32px}
+}

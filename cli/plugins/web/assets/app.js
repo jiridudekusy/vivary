@@ -17,8 +17,15 @@ let polling = null;
 // and this history entry at once.
 let enrollToken = (() => {
   const m = location.hash.match(/^#enroll=([A-Za-z0-9_-]{20,})$/);
-  if (location.hash) history.replaceState(null, '', location.pathname);
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   return m ? m[1] : null;
+})();
+
+// Where to go back to after signing in (a screen sends you here when signed
+// out). Only a screen path of this site — never an arbitrary URL.
+const next = (() => {
+  const n = new URLSearchParams(location.search).get('next') || '';
+  return /^\/vnc\/[^/?#\\]+$/.test(n) ? n : null;
 })();
 
 function toast(msg, bad) {
@@ -106,6 +113,7 @@ async function boot() {
     return;
   }
   if (status.authenticated) {
+    if (next) return location.replace(next);
     csrf = status.csrf;
     return showApp(status);
   }
@@ -188,6 +196,7 @@ function card(s) {
     <p class="meta">${esc(s.runtime)} · ${esc(s.agent)}${s.memory ? ` · ${esc(s.memory)}` : ''}</p>
     <p class="meta">${esc(s.workspace)}</p>
     ${s.running ? conn : ''}
+    ${s.screen ? `<a class="act screen" href="/vnc/${esc(encodeURIComponent(s.name))}">Open screen</a>` : ''}
     <button class="act ${s.running ? 'stop' : ''}" data-act="${s.running ? 'down' : 'up'}" data-name="${esc(s.name)}">
       ${s.running ? 'Stop' : 'Start'}</button>
   </article>`;

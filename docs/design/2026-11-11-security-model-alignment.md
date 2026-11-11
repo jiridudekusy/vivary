@@ -319,6 +319,13 @@ Decisions:
   upgrade (`--auth-plugin BasicHTTPAuth`, present in the image's websockify 0.10), known
   only to the web server, plus an in-sandbox firewall that admits only the Mac to the
   noVNC port.
+  *Built differently (step 2):* the firewall would need CAP_NET_ADMIN, which the default
+  capability set lacks on both runtimes [verified: Apple's bounding set]. Instead VNC
+  leaves the network entirely: x11vnc on the sandbox's loopback, and the web carries the
+  stream over `<runtime> exec -i <container> vnc-relay` [measured: ~0.4 s to connect,
+  ~15 ms round trip, both runtimes]. No port for another sandbox, no secret to keep —
+  stronger than the plan and simpler. noVNC's client is served by the web from the Mac
+  (npm, pinned), never from the sandbox.
 - **Agent logins stay as they are** (option A): `dot-claude/.credentials.json` and
   `dot-codex/auth.json` remain files on the Mac, mounted into the sandbox — a known
   exception to "no plaintext".

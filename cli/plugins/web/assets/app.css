@@ -151,3 +151,7 @@ form button{border:1px solid var(--primary);background:var(--primary);color:#fff
 .pk button{border:0;background:none;color:var(--negative);font-size:19px;min-width:44px;min-height:44px;cursor:pointer}
 .row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 .row-actions .ghost{min-height:44px}
+
+/* The screen link sits above Start/Stop: a quieter, outlined button. */
+a.act{text-decoration:none}
+.act.screen{background:var(--surface);color:var(--primary-text);box-shadow:none}

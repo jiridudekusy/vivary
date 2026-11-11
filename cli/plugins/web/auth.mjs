@@ -195,6 +195,13 @@ export function createAuth({
     return s;
   }
 
+  // For what outlives a request (a VNC WebSocket): is this session still the
+  // live one? False after logout, "sign out everywhere", removal of its
+  // passkey, expiry — and after a restart, which empties the map.
+  function sessionAlive(session) {
+    return !!session && sessions.get(session.key) === session && session.expiresAt > now();
+  }
+
   function checkCsrf(req, session) {
     if (!safeEqual(req.headers['x-csrf-token'], session.csrf)) {
       throw new HttpError(403, 'missing or wrong CSRF token — reload the page');
@@ -434,7 +441,7 @@ export function createAuth({
     return null;
   }
 
-  return { route, sessionFor, checkCsrf, consumeStepUp, configured, cookieName, origin, rpId };
+  return { route, sessionFor, sessionAlive, checkCsrf, consumeStepUp, configured, cookieName, origin, rpId };
 }
 
 // Display names only: letters, digits, spaces and a little punctuation.

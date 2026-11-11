@@ -1,108 +1,82 @@
-// headed: GUI stack (Xvfb + x11vnc + noVNC) so the user can watch and drive
-// the agent's browser from the host.
+// headed: GUI stack (Xvfb + openbox + x11vnc) so the user can watch and drive
+// the agent's browser — through `vivary web`, behind its passkey.
 //
 // Sticky, like every other host integration: `create --headed` used to be
 // forgotten at once (the flag only applied to the command it was given to),
 // so the GUI never came up on the next start.
 //
-// The stack can be started LIVE with `start-gui` (it is idempotent), so on
-// Apple `container` a kept container gets it from postUp without --recreate.
-// Where noVNC is published to host loopback (docker; Apple with --tailscale,
-// see tailnetUrl) that publish is baked in at creation, so there `headed` is
-// part of the container snapshot and switching it asks for --recreate.
+// SECURITY — VNC never touches the network. History: noVNC was served on
+// 0.0.0.0:6080 without a password (verified: agent-sandbox could open findmy's
+// browser while it held an iCloud login), then behind VNC's own password,
+// which the protocol cuts to 8 characters, plus a per-sandbox tailnet share.
+// Now x11vnc listens on the sandbox's 127.0.0.1 only, and the one viewer is
+// `vivary web` (web/vnc.mjs): per viewer it runs `<runtime> exec -i
+// <container> vnc-relay` and carries the RFB stream over the runtime's exec
+// channel. So: no port another sandbox could reach (no firewall needed —
+// which would have wanted CAP_NET_ADMIN, absent from the default capability
+// set), and no password or token at all, so nothing to store, print or leak.
+// Whoever can run `container exec` on the Mac owns every sandbox anyway.
 //
-// SECURITY: the VNC server used to run without a password, reachable by every
-// other sandbox on the same network — verified, agent-sandbox could open
-// findmy's VNC while that browser held an iCloud login. Each sandbox now gets
-// its own password, kept on the Mac (~/.vivary/<name>/vnc-password, 0600) and
-// passed in at start; x11vnc listens on localhost only, so the one way in is
-// noVNC with that password. VNC auth truncates passwords to 8 characters.
-// vivary never PRINTS the password, only the file it is in: its output ends up
-// in terminal scrollback and in the transcripts of agents that run vivary
-// commands. Never in the URL either: a URL lands in browser history (synced to
-// other devices) and, copied on the Mac, in the clipboard — which the clipboard
-// plugin syncs into every sandbox that has it, handing the password to their
-// agents. Not copied to the clipboard for the same reason. noVNC asks for it
-// when it connects.
-import crypto from 'node:crypto';
+// The stack starts live (start-gui is idempotent), so turning headed on needs
+// no --recreate on either runtime. A container made from an older image has
+// no vnc-relay (and serves noVNC on its network): it is told to --recreate.
 import fs from 'node:fs';
 import path from 'node:path';
-import { capture, die, parseArgs, tildify } from '../../core/util.mjs';
-import { containerDnsDomain, containerName } from '../../core/runtime.mjs';
-import { assignStablePort, loadSandbox, resolveName, sandboxDir } from '../../core/sandbox.mjs';
+import { capture, die, parseArgs } from '../../core/util.mjs';
+import { loadSandbox, resolveName, sandboxDir, saveSandbox } from '../../core/sandbox.mjs';
 import { effectiveSandbox } from '../../core/effective.mjs';
-import { tailnetPortFree, tailscaleBin } from '../tailscale/plugin.mjs';
-import { selfTailnetFqdn } from '../web/server.mjs';
+import { tailscaleBin } from '../tailscale/plugin.mjs';
+import { WEB_PORT, selfTailnetFqdn } from '../web/server.mjs';
+import { readServerInfo } from '../web/auth.mjs';
+import { DEFAULT_TAILNET_PORT, webOrigin } from '../web/plugin.mjs';
 
-const PW_ALPHABET = 'abcdefghjkmnpqrstuvwxyzACDEFHJKLMNPQRTUVWXY3479'; // no 0/O, 1/l/I, 2/Z, 5/S, 6/G, 8/B
-const PW_LENGTH = 8; // VNC's own limit
+const RUNTIMES = ['container', 'docker'];
 
-export function generateVncPassword(randomInt = crypto.randomInt) {
-  let pw = '';
-  for (let i = 0; i < PW_LENGTH; i++) pw += PW_ALPHABET[randomInt(PW_ALPHABET.length)];
-  return pw;
+// Where the screen opens: the running web's own address, or the one it will
+// have when started with defaults.
+export function screenLines(name, { info = readServerInfo(), fqdn = selfTailnetFqdn } = {}) {
+  const origin = info?.origin
+    || webOrigin({ fqdn: fqdn(), tailnetPort: DEFAULT_TAILNET_PORT, port: WEB_PORT }).origin;
+  const lines = [`${origin}/vnc/${encodeURIComponent(name)}`];
+  if (!info) lines.push('vivary web is not running — start it with: vivary web');
+  return lines;
 }
 
-export const vncPasswordFile = (name) => path.join(sandboxDir(name), 'vnc-password');
-
-export function vncPassword(name) {
-  const file = vncPasswordFile(name);
-  if (!fs.existsSync(file)) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${generateVncPassword()}\n`, { mode: 0o600 });
+// Leftovers of the old design: a tailnet share of noVNC (with --tailscale) and
+// the VNC password, in plaintext on the Mac. Neither is used any more.
+function dropLegacy(cfg, { keepPassword = false } = {}) {
+  let changed = false;
+  if (cfg?.tsNovncPort) {
+    const bin = tailscaleBin();
+    if (bin) capture(bin, ['serve', `--https=${cfg.tsNovncPort}`, 'off']);
+    delete cfg.tsNovncPort;
+    changed = true;
   }
-  return fs.readFileSync(file, 'utf8').trim();
+  // A container still on the old image prompts for it until --recreate.
+  if (!keepPassword && cfg?.name) fs.rmSync(path.join(sandboxDir(cfg.name), 'vnc-password'), { force: true });
+  return changed;
 }
 
-// Where the browser can be watched from the Mac. Apple `container` VMs are
-// reachable by name through the container DNS domain, so nothing needs
-// publishing and several headed sandboxes coexist. Docker publishes a stable
-// per-sandbox port on 127.0.0.1 — it used to be a fixed 6080 on every
-// interface, which put the browser on the LAN and made a second headed docker
-// sandbox fail with "port is already allocated".
-export function novncUrl({ runtime, cname, domain, port }) {
-  const base = runtime === 'container' && domain
-    ? `http://${cname}.${domain}:6080`
-    : `http://localhost:${port}`;
-  return `${base}/vnc.html?autoconnect=true&resize=scale`;
-}
-
-// With --tailscale the GUI must be reachable from the user's other devices
-// too (iPhone, iPad), so noVNC is shared on the tailnet the way Paseo is:
-// `tailscale serve --https=<tsNovncPort>` -> 127.0.0.1:<novncPort>, HTTPS with
-// the tailnet's certificate, tailnet-only, still behind the VNC password.
-// serve cannot reach the container network itself — the macOS extension
-// refuses "remote destinations from non-default route" (measured: HTTP 000) —
-// so it needs a loopback publish, which Apple `container` gets only then.
-export const tailnetUrl = (fqdn, tsPort) => `https://${fqdn}:${tsPort}/vnc.html?autoconnect=true&resize=scale`;
-const needsPublish = (cfg) => cfg.runtime === 'docker' || (cfg.runtime === 'container' && !!cfg.tailscale);
-
-// What to show the user: each URL, then where the password is — never the
-// password itself.
-export function accessLines(urls, passwordFile) {
-  return [...[].concat(urls), `password: in ${tildify(passwordFile)}`];
-}
-
-async function urlFor(cfg, cname) {
-  const domain = cfg.runtime === 'container' ? containerDnsDomain() : '';
-  const port = needsPublish(cfg) ? await assignStablePort(cfg, { key: 'novncPort', base: 6080, preferred: 6080 }) : null;
-  return { url: novncUrl({ runtime: cfg.runtime, cname, domain: domain || '', port }), port };
-}
-
-async function tailnetFor(cfg) {
-  if (!cfg.tailscale) return null;
-  const fqdn = selfTailnetFqdn();
-  if (!fqdn) return null;
-  const tsPort = await assignStablePort(cfg, { key: 'tsNovncPort', base: 8700, isFree: tailnetPortFree() });
-  return { fqdn, tsPort, url: tailnetUrl(fqdn, tsPort) };
-}
-
-// Drop this sandbox's tailnet share. A stale rule would point a tailnet HTTPS
-// port at a dead loopback port, and the next sandbox given that port would
-// inherit the URL.
-function unshare(cfg) {
-  const bin = tailscaleBin();
-  if (bin && cfg?.tsNovncPort) capture(bin, ['serve', `--https=${cfg.tsNovncPort}`, 'off']);
+// Start the stack in a running container. True when a screen is there to
+// relay; otherwise says why (loudly) and returns false.
+function startGui(cfg, cname) {
+  const probe = capture(cfg.runtime, ['exec', cname, 'test', '-x', '/usr/local/bin/vnc-relay'], { timeout: 30000 });
+  if (probe.status === 1) {
+    console.error(`WARNING: headed: '${cfg.name}' was made from an image older than screens through vivary web\n`
+      + '    (its GUI would still be served on the network). Rebuild it once:\n'
+      + `    vivary up ${cfg.name} --recreate`);
+    return false;
+  }
+  // setsid -w: the stack must outlive the exec session, and the call returns
+  // once start-gui has it running.
+  const r = probe.status === 0
+    ? capture(cfg.runtime, ['exec', cname, 'setsid', '-w', 'start-gui'], { timeout: 60000 })
+    : probe;
+  if (r.status !== 0) {
+    console.error(`WARNING: headed: GUI did not start: ${(r.stderr || r.stdout || '').trim()}`);
+    return false;
+  }
+  return true;
 }
 
 async function cmdHeaded(argv) {
@@ -111,10 +85,8 @@ async function cmdHeaded(argv) {
   // Resolved like a start (the flag may come from a profile or .vivary.json).
   const cfg = effectiveSandbox(name) || die(`sandbox '${name}' does not exist`);
   if (!cfg.headed) die(`'${name}' is not headed — start it with: vivary up ${name} --headed`);
-  const { url } = await urlFor(cfg, containerName(name));
-  const ts = await tailnetFor(cfg);
-  vncPassword(name); // make sure the file exists
-  for (const line of accessLines(ts ? [url, ts.url] : [url], vncPasswordFile(name))) console.log(line);
+  for (const line of screenLines(name)) console.log(line);
+  if (!loadSandbox(name)?.vncRelay) console.log(`(no screen until the next start: vivary up ${name})`);
 }
 
 export default {
@@ -125,64 +97,42 @@ export default {
     headed: {
       type: 'boolean',
       sticky: true,
-      // Not in the generic snapshot: on Apple `container` postUp starts the
-      // GUI live. containerSnapshot below adds it back where it IS baked in.
+      // Not in the generic snapshot: postUp starts the GUI live.
       snapshot: false,
-      help: 'GUI stack in the sandbox (sticky): the agent\'s browser is\nvisible and drivable via noVNC, password-protected.\nThe URL is printed on start, the password never — only\nthe file it is in; again with: vivary headed <name>',
+      help: 'GUI stack in the sandbox (sticky): watch and drive the\nagent\'s browser in vivary web (passkey login). The\naddress is printed on start; again with: vivary headed <name>',
     },
   },
-  // The noVNC publish is baked in at creation wherever there is one: always on
-  // docker, and on Apple `container` with --tailscale (serve needs it). There,
-  // switching headed asks for --recreate; elsewhere postUp starts it live.
-  containerSnapshot: (cfg) => (needsPublish(cfg) ? { headed: !!cfg.headed } : {}),
+  // Containers from before baked a noVNC publish in and recorded `headed` in
+  // their snapshot. Echo the saved value back, so that alone is no reason to
+  // refuse them (postUp asks for the --recreate their old image needs); it
+  // stays an inert constant after.
+  containerSnapshot: (cfg) => (cfg.containerConfig && 'headed' in cfg.containerConfig
+    ? { headed: cfg.containerConfig.headed } : {}),
   async runArgs(ctx) {
-    const { cfg, cname } = ctx;
-    if (!cfg.headed) return [];
-    const { port } = await urlFor(cfg, cname);
-    return [
-      '-e', 'HEADED=1',
-      '-e', `VIVARY_VNC_PASSWORD=${vncPassword(cfg.name)}`,
-      ...(port ? ['-p', `127.0.0.1:${port}:6080`] : []),
-    ];
+    return ctx.cfg.headed ? ['-e', 'HEADED=1'] : [];
   },
-  // Start (or confirm) the stack and print where to watch it. Idempotent:
-  // the boot hook may have started it already; a kept container created
-  // without --headed gets it here. setsid -w: the stack must outlive the exec
-  // session, and the call returns once start-gui has it running.
+  // Start (or confirm) the stack, record whether the web can relay a screen
+  // (`vncRelay`, read by web/vnc.mjs without re-resolving profiles), and print
+  // where to open it. Idempotent: the boot hook may have started it already.
   async postUp(ctx) {
     const { cfg, cname } = ctx;
-    if (!cfg.headed || !cfg.tailscale) unshare(cfg);
-    if (!cfg.headed || !['container', 'docker'].includes(cfg.runtime)) return;
-    const r = capture(cfg.runtime, ['exec', '-e', `VIVARY_VNC_PASSWORD=${vncPassword(cfg.name)}`,
-      cname, 'setsid', '-w', 'start-gui'], { timeout: 60000 });
-    if (r.status !== 0) {
-      console.error(`WARNING: headed: GUI did not start: ${(r.stderr || r.stdout).trim()}`);
-      return;
+    const ok = !!cfg.headed && RUNTIMES.includes(cfg.runtime) && startGui(cfg, cname);
+    let changed = dropLegacy(cfg, { keepPassword: !!cfg.headed && !ok });
+    if (ok !== !!cfg.vncRelay) {
+      if (ok) cfg.vncRelay = true;
+      else delete cfg.vncRelay;
+      changed = true;
     }
-    const { url, port } = await urlFor(cfg, cname);
-    const urls = [url];
-    if (cfg.tailscale) {
-      const ts = await tailnetFor(cfg);
-      const bin = tailscaleBin();
-      if (!ts || !bin) {
-        console.error('WARNING: headed: tailscale is not reporting this host — the GUI is reachable from this Mac only.');
-      } else if (!port) {
-        // a kept Apple container created before --tailscale: no loopback publish to share
-        console.error(`WARNING: headed: not shared on the tailnet — rebuild once with: vivary up ${cfg.name} --recreate`);
-      } else {
-        const r = capture(bin, ['serve', '--bg', `--https=${ts.tsPort}`, `http://127.0.0.1:${port}`]);
-        if (r.status === 0) urls.push(ts.url);
-        else console.error(`WARNING: headed: could not share on the tailnet: ${(r.stderr || r.stdout).trim()}`);
-      }
-    }
-    const lines = accessLines(urls, vncPasswordFile(cfg.name));
-    const pw = lines.pop();
-    ctx.log(`==> Headed: watch and drive the browser at\n${lines.map((l) => `    ${l}`).join('\n')}\n`
-      + `    ${pw}  (noVNC asks for it; again with: vivary headed ${cfg.name})`);
+    if (changed) saveSandbox(cfg);
+    if (!ok) return;
+    const [url, ...rest] = screenLines(cfg.name);
+    ctx.log(`==> Headed: watch and drive the browser at\n    ${url}  (vivary web, passkey)`
+      + rest.map((l) => `\n    ${l}`).join(''));
   },
 
-  // Every rm: the share must not outlive the container (see unshare).
+  // Every rm: a legacy tailnet share must not outlive the container, and the
+  // next container (new image) has no use for the old password.
   onRemove(name, cfg) {
-    unshare(cfg || loadSandbox(name));
+    dropLegacy(cfg || loadSandbox(name));
   },
 };

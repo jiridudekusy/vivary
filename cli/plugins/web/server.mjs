@@ -28,6 +28,7 @@ import { resolveRuntime } from '../../core/runtimes/index.mjs';
 
 import { deviceFile, listDevices, parsePublicKey } from '../ssh/devices.mjs';
 import { HttpError } from './auth.mjs';
+import { VNC_RUNTIMES, createVncBridge, relayFor } from './vnc.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const WEB_PORT = Number(process.env.VIVARY_WEB_PORT || 7378);
@@ -96,6 +97,8 @@ export function sandboxList(fqdn) {
       memory: cfg.memory || null,
       tailscale: !!cfg.tailscale,
       desiredRunning: !!cfg.desiredRunning,
+      // The headed GUI is up in a container that can relay it (headed postUp).
+      screen: !!cfg.vncRelay && holders.some((r) => VNC_RUNTIMES.includes(r)),
       connect: connectionInfo(cfg, fqdn),
     };
   }).filter(Boolean);
@@ -184,22 +187,42 @@ export function outerGate(req, allowed, origin) {
 
 // On every response. The page loads only its own files (no inline script, so
 // an injected <script> does not run), cannot be framed, leaks no referrer.
-const SECURITY_HEADERS = {
-  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
-    + "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-  'x-content-type-options': 'nosniff',
-  'referrer-policy': 'no-referrer',
-  'cross-origin-opener-policy': 'same-origin',
-  'x-frame-options': 'DENY',
-  'cache-control': 'no-store',
-};
+// connect-src names the WebSocket origin too: 'self' covers ws(s) only in
+// CSP3, and older Safari did not count it.
+export function securityHeaders(origin) {
+  const wsOrigin = origin ? ` ${origin.replace(/^http/, 'ws')}` : '';
+  return {
+    'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+      + `img-src 'self' data:; connect-src 'self'${wsOrigin}; base-uri 'none'; form-action 'none'; `
+      + "frame-ancestors 'none'",
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'cross-origin-opener-policy': 'same-origin',
+    'x-frame-options': 'DENY',
+    'cache-control': 'no-store',
+  };
+}
 
 // The page's own files: a fixed list, never a path from the request.
 const ASSETS = {
   '/assets/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/assets/webauthn.js': ['webauthn.js', 'text/javascript; charset=utf-8'],
   '/assets/app.css': ['app.css', 'text/css; charset=utf-8'],
+  '/assets/vnc.js': ['vnc.js', 'text/javascript; charset=utf-8'],
+  '/assets/vnc.css': ['vnc.css', 'text/css; charset=utf-8'],
 };
+
+// noVNC's client library (npm @novnc/novnc, pinned), served from the CLI's own
+// node_modules — from the Mac, never from a sandbox (see vnc.mjs). Only its
+// .js modules under core/ and vendor/, resolved and checked to stay inside.
+const NOVNC_DIR = path.join(CLI_DIR, 'node_modules', '@novnc', 'novnc');
+export function novncFile(urlPath, dir = NOVNC_DIR) {
+  const m = urlPath.match(/^\/novnc\/((?:core|vendor)\/[A-Za-z0-9_./-]+\.js)$/);
+  if (!m || m[1].split('/').some((seg) => seg === '..' || seg === '.' || seg === '')) return null;
+  const file = path.resolve(dir, m[1]);
+  if (!file.startsWith(`${path.resolve(dir)}${path.sep}`)) return null;
+  return fs.existsSync(file) && fs.statSync(file).isFile() ? file : null;
+}
 
 const json = (res, status, body, headers = {}) => {
   const payload = JSON.stringify(body);
@@ -227,9 +250,11 @@ function knownSandbox(name) {
 }
 
 export function createServer({
-  allow, auth, run = runVivary, fqdn = selfTailnetFqdn, log = (m) => console.log(`[web] ${m}`),
+  allow, auth, ws, relay = relayFor, screens = {}, run = runVivary, fqdn = selfTailnetFqdn,
+  log = (m) => console.log(`[web] ${m}`),
 } = {}) {
   if (!auth) throw new Error('createServer needs auth (see auth.mjs)');
+  const headers = securityHeaders(auth.origin);
   // Resolved once per request but cached briefly — `tailscale status` is a
   // subprocess and the UI polls.
   let cached = null;
@@ -242,8 +267,8 @@ export function createServer({
     return cached;
   };
 
-  return http.createServer(async (req, res) => {
-    for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+  const server = http.createServer(async (req, res) => {
+    for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
     // Who tailscale serve says it is (it overwrites any such header a client
@@ -259,6 +284,18 @@ export function createServer({
         const [file, type] = ASSETS[p];
         res.writeHead(200, { 'content-type': type });
         return res.end(fs.readFileSync(path.join(HERE, 'assets', file)));
+      }
+      // A sandbox's screen. The page is static and holds nothing; it checks
+      // the session itself, and the WebSocket is gated again (vnc.mjs).
+      if (req.method === 'GET' && /^\/vnc\/[^/]+$/.test(p)) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        return res.end(fs.readFileSync(path.join(HERE, 'vnc.html')));
+      }
+      if (req.method === 'GET' && p.startsWith('/novnc/')) {
+        const file = novncFile(p);
+        if (!file) return json(res, 404, { ok: false, error: 'not found' });
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'private, max-age=3600' });
+        return res.end(fs.readFileSync(file));
       }
 
       // Self-hosted Roboto / Roboto Mono, same files the approval-mcp-wrapper UI
@@ -299,6 +336,15 @@ export function createServer({
           sandboxes: sandboxList(host),
           devices: listDevices().map((d) => ({ name: d.name, key: d.key })),
         });
+      }
+
+      // Can this sandbox's screen be opened? The viewer asks first, and again
+      // after a disconnect, to say why (a WebSocket close says little).
+      const screen = p.match(/^\/api\/vnc\/([^/]+)$/);
+      if (req.method === 'GET' && screen) {
+        const name = decodeURIComponent(screen[1]);
+        const { runtime } = relay(name);
+        return json(res, 200, { ok: true, name, runtime });
       }
 
       const action = p.match(/^\/api\/sandboxes\/([^/]+)\/(up|down)$/);
@@ -353,6 +399,17 @@ export function createServer({
       return json(res, 500, { ok: false, error: e?.message || String(e) });
     }
   });
+
+  // Screens: the WebSocket upgrade, behind the same gates and the session.
+  if (ws) {
+    const bridge = createVncBridge({ ws, auth, allowedLogins, relay, log, ...screens });
+    server.on('upgrade', bridge.handleUpgrade);
+    server.on('close', bridge.close);
+    server.screens = bridge;
+  } else {
+    server.on('upgrade', (req, socket) => socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'));
+  }
+  return server;
 }
 
 function parseJson(text) {
