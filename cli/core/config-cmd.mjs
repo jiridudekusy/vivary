@@ -11,6 +11,7 @@ import { profileNames } from './layers.mjs';
 import { pluginFlagDefs } from './plugins.mjs';
 import { effectiveSandbox } from './effective.mjs';
 import { listSandboxNames, loadSandbox, resolveName } from './sandbox.mjs';
+import { configJson } from './settings-cmd.mjs';
 
 const on = (v) => (Array.isArray(v) ? v.length > 0 : !!v);
 const show = (v) => (Array.isArray(v) ? v.join(', ') : v === true ? 'on' : v === false ? 'off' : String(v));
@@ -44,8 +45,12 @@ function table(rows) {
 }
 
 export function cmdConfig(argv) {
-  const { flags, positionals } = parseArgs(argv, { name: 'string' });
+  const { flags, positionals } = parseArgs(argv, { name: 'string', json: 'boolean' });
   const name = resolveName(flags.name || positionals[0], process.cwd());
+  if (flags.json) {
+    console.log(JSON.stringify(configJson(name)));
+    return;
+  }
   const cfg = effectiveSandbox(name) || die(`sandbox '${name}' does not exist`);
   const { resolved, projectConfig } = cfg;
   const hasProject = projectConfig !== null;

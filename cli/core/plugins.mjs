@@ -61,6 +61,10 @@ export function getPlugins() {
   return loaded;
 }
 
+// For long-running code that must not die() (vivary web) and may run without
+// the plugins (a test server).
+export const pluginsLoaded = () => loaded !== null;
+
 // Aggregated flag spec for parseArgs (core spec + all plugin flags). A flag
 // declaring `short` keeps the object shape so parseArgs can wire the alias.
 export function pluginFlagSpec() {

@@ -155,8 +155,23 @@ English, converse with the user in Czech.
   — a touch cannot be spent on another key. Strict CSP: no inline script/style
   (ui.html + assets/app.js|app.css|webauthn.js). Tests drive the real server
   with a software authenticator (real P-256/CBOR, `test/web-auth.test.mjs`).
-  Screens of headed sandboxes: /vnc/<name> (see headed below). Plan for the
-  rest (settings, vault): docs/design/2026-11-11-security-model-alignment.md §7.
+  Screens of headed sandboxes: /vnc/<name> (see headed below). One sandbox
+  (#/s/<name>, plugins/web/manage.mjs + assets/detail.js): connect details,
+  settings, `.vivary.json` approval, start/stop/restart/recreate. Every change
+  runs as a vivary CHILD (`vivary set|approve|up|down`, core/settings-cmd.mjs)
+  so a die() never kills the server, behind step-ups bound to the request
+  (`settings` {name, changes}, `config-approve` {name, sha256}, `recreate`
+  {name}). `vivary set` writes the sandbox's OWN layer and refuses what the
+  approved project file decides (it is above that layer) and list flags
+  (--publish/--volume: host ports and paths stay CLI-only). It reports the
+  effect: none / next-start / restart / recreate (snapshot drift of the kept
+  container); `vivary config --json` carries `pendingRecreate`. The web reads
+  .vivary.json with O_NOFOLLOW|O_NONBLOCK, regular file, <= 256 KB — an agent
+  could otherwise symlink it to ~/.ssh/id_* and get the key shown as a diff, or
+  make it a FIFO and hang the server. Long-running code must not call
+  getPlugins() unguarded (it die()s when plugins are not loaded): use
+  `pluginsLoaded()`. Plan for the rest (vault):
+  docs/design/2026-11-11-security-model-alignment.md §7.
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).

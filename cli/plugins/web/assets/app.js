@@ -1,6 +1,7 @@
 // vivary web — the page. A module served as a file: the CSP allows no inline
 // script, so an injected <script> tag would not run.
 import { cancelled, createPasskey, getPasskey, passkeysAvailable } from '/assets/webauthn.js';
+import { createDetail } from '/assets/detail.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
@@ -17,7 +18,7 @@ let polling = null;
 // and this history entry at once.
 let enrollToken = (() => {
   const m = location.hash.match(/^#enroll=([A-Za-z0-9_-]{20,})$/);
-  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  if (location.hash.startsWith('#enroll=')) history.replaceState(null, '', location.pathname + location.search);
   return m ? m[1] : null;
 })();
 
@@ -57,7 +58,10 @@ async function api(path, { method = 'GET', body } = {}) {
     boot();
     throw new Error('Signed out — sign in again.');
   }
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const last = String(data.output || '').trim().split('\n').filter(Boolean).pop();
+    throw new Error(data.error || last || `HTTP ${res.status}`);
+  }
   return data;
 }
 
@@ -161,12 +165,26 @@ async function login() {
 
 function showApp(status) {
   $('#gate').hidden = true;
-  $('#app').hidden = false;
   $('#logout').hidden = false;
   renderPasskeys(status.passkeys || []);
-  load();
+  route();
   polling ||= setInterval(() => { if (!busy && !$('#app').hidden) load(); }, 15000);
 }
+
+// #/s/<name> opens one sandbox; anything else is the list.
+const detail = createDetail({ $, esc, api, stepUp, toast, fail, onChange: () => load() });
+function route() {
+  if (!csrf) return;
+  const m = location.hash.match(/^#\/s\/([^/]+)$/);
+  $('#app').hidden = !!m;
+  $('#detail').hidden = !m;
+  if (m) {
+    window.scrollTo(0, 0);
+    return detail.open(decodeURIComponent(m[1]));
+  }
+  return load();
+}
+window.addEventListener('hashchange', route);
 
 async function load() {
   try {
@@ -191,8 +209,10 @@ function card(s) {
        <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>`
     : `<p class="hint">${esc(s.connect.hint || '')}</p>`;
   return `<article class="card ${s.running ? 'on' : ''}">
-    <div class="head"><i class="status-dot"></i><div class="name">${esc(s.name)}</div>
+    <div class="head"><i class="status-dot"></i>
+      <a class="name" href="#/s/${esc(encodeURIComponent(s.name))}">${esc(s.name)}</a>
       <div class="state">${s.running ? 'Running' : 'Stopped'}</div></div>
+    ${s.approval ? `<a class="badge warn" href="#/s/${esc(encodeURIComponent(s.name))}">.vivary.json waits for approval</a>` : ''}
     <p class="meta">${esc(s.runtime)} · ${esc(s.agent)}${s.memory ? ` · ${esc(s.memory)}` : ''}</p>
     <p class="meta">${esc(s.workspace)}</p>
     ${s.running ? conn : ''}
@@ -256,6 +276,8 @@ document.addEventListener('click', async (e) => {
   }
   const a = e.target.closest('[data-act]');
   if (a) return act(a);
+  const d = e.target.closest('[data-d]');
+  if (d) return detail.action(d);
 
   const rm = e.target.closest('[data-rm]');
   if (rm) {

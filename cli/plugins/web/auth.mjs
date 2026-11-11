@@ -28,7 +28,9 @@ const MAX_CHALLENGES = 200;
 const MAX_BAD_ENROLL_TOKENS = 10;
 
 // Actions a step-up can authorize. Anything else is refused at the options step.
-export const STEP_UP_ACTIONS = new Set(['device-add', 'passkey-add', 'passkey-remove']);
+// settings: a `vivary set` change; recreate: throws away the container's
+// contents; config-approve: the exact .vivary.json content (its sha256).
+export const STEP_UP_ACTIONS = new Set(['device-add', 'passkey-add', 'passkey-remove', 'settings', 'recreate', 'config-approve']);
 
 export class HttpError extends Error {
   constructor(status, message) {

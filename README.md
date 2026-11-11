@@ -37,6 +37,12 @@ vivary up [name]            long-running container with sshd (Claude Desktop, ID
 vivary down [name]          stop the long-running container
 vivary ls                   list sandboxes across both runtimes
 vivary config [name]        the sandbox's settings and where each one comes from
+vivary set [name] --memory 8g --headed=off ...
+                         change the sandbox's own settings without starting it;
+                         says whether that takes the next start, a restart or
+                         a --recreate (not for --publish / --volume)
+vivary approve [name]       review and approve a changed .vivary.json without
+                         starting the sandbox
 vivary profile [ls|show p]  named profiles (~/.vivary/profiles/<p>.json) and
                          the sandboxes using them
 vivary stats [--trim]       how hard the VMs press on the Mac (RAM, CPU, open
@@ -92,7 +98,8 @@ defaults add to the list instead of replacing it; `dockerd` merges key by key.
 Turn an inherited flag off on one sandbox with `--<flag>=off`. CLI flags that
 extend the file are written back (union only — nothing is ever removed).
 Unknown keys fail loudly. `vivary config <name>` prints every setting with the
-layer it came from.
+layer it came from. A changed file blocks every start until it is approved —
+on a terminal at the next start, with `vivary approve <name>`, or in the web UI.
 
 `"dockerd"` is the daemon.json of the Docker inside a `--docker` sandbox —
 `insecure-registries`, `registry-mirrors`, `dns`, … (`hosts` is refused: it
@@ -380,6 +387,22 @@ its own). A passkey belongs to one address: use the `ts.net` one on the Mac too.
   enrollment token — no secret.
 - Not offered from the web: creating a sandbox, changing its workspace or
   mounts (raw access to the Mac's disk).
+
+**One sandbox** (tap its name): how to get in — the `ssh` line for the
+tailnet and for this Mac, a `~/.ssh/config` block, *Open in Cursor / VS Code*
+links, the Paseo address (never its password) — then its settings, and
+Start / Stop / Restart / Recreate.
+
+- **Settings** are memory, CPUs, profiles and the on/off features. Saving asks
+  for a passkey touch made for exactly that change and runs `vivary set`; the
+  page then says what it takes: the next start, a restart, or a rebuild of the
+  container (which loses what was installed inside — that takes a touch too).
+  Settings that `.vivary.json` decides are shown, not editable: change the file.
+  Never from the web: the workspace, `--volume`, `--publish`.
+- **`.vivary.json` approval:** a changed project file shows as a diff against
+  the approved copy. *Approve* takes a touch bound to the sha256 of exactly
+  that content, so a file changed after you looked is refused. The page reads
+  the file without following a symlink and only if it is a small regular file.
 
 **Screens** (`--headed` sandboxes): *Open screen* on a running sandbox's card,
 or `https://<mac>.<tailnet>.ts.net:8737/vnc/<name>`. The viewer is noVNC's

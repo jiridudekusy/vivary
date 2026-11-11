@@ -29,6 +29,10 @@ import { resolveRuntime } from '../../core/runtimes/index.mjs';
 import { deviceFile, listDevices, parsePublicKey } from '../ssh/devices.mjs';
 import { HttpError } from './auth.mjs';
 import { VNC_RUNTIMES, createVncBridge, relayFor } from './vnc.mjs';
+import {
+  connectDetails, lastJson, pendingApproval, projectValidator, settingsArgv,
+} from './manage.mjs';
+import { pluginFlagDefs, pluginsLoaded } from '../../core/plugins.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const WEB_PORT = Number(process.env.VIVARY_WEB_PORT || 7378);
@@ -99,6 +103,8 @@ export function sandboxList(fqdn) {
       desiredRunning: !!cfg.desiredRunning,
       // The headed GUI is up in a container that can relay it (headed postUp).
       screen: !!cfg.vncRelay && holders.some((r) => VNC_RUNTIMES.includes(r)),
+      // Its .vivary.json changed and waits for approval (a start would refuse).
+      approval: !!pendingApproval(cfg),
       connect: connectionInfo(cfg, fqdn),
     };
   }).filter(Boolean);
@@ -112,16 +118,17 @@ function runVivary(args, timeoutMs = 180000) {
     const child = spawn(process.execPath, [path.join(CLI_DIR, 'vivary.mjs'), ...args],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
+    let stdout = '';
     const cap = (b) => { out += b.toString(); if (out.length > 60000) out = out.slice(-60000); };
-    child.stdout.on('data', cap);
+    child.stdout.on('data', (b) => { cap(b); stdout = (stdout + b).slice(-200000); });
     child.stderr.on('data', cap);
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      resolve({ ok: false, output: `${out}\n\nTIMED OUT after ${timeoutMs / 1000}s` });
+      resolve({ ok: false, output: `${out}\n\nTIMED OUT after ${timeoutMs / 1000}s`, stdout });
     }, timeoutMs);
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ ok: code === 0, output: out.trim() });
+      resolve({ ok: code === 0, output: out.trim(), stdout });
     });
   });
 }
@@ -209,6 +216,7 @@ const ASSETS = {
   '/assets/webauthn.js': ['webauthn.js', 'text/javascript; charset=utf-8'],
   '/assets/app.css': ['app.css', 'text/css; charset=utf-8'],
   '/assets/vnc.js': ['vnc.js', 'text/javascript; charset=utf-8'],
+  '/assets/detail.js': ['detail.js', 'text/javascript; charset=utf-8'],
   '/assets/vnc.css': ['vnc.css', 'text/css; charset=utf-8'],
 };
 
@@ -347,13 +355,71 @@ export function createServer({
         return json(res, 200, { ok: true, name, runtime });
       }
 
-      const action = p.match(/^\/api\/sandboxes\/([^/]+)\/(up|down)$/);
+      // One sandbox: how to connect, its settings (from `vivary config
+      // --json`, a child — resolving profiles can die()), what waits for approval.
+      const one = p.match(/^\/api\/sandboxes\/([^/]+)$/);
+      if (req.method === 'GET' && one) {
+        const name = knownSandbox(decodeURIComponent(one[1]));
+        if (!name) return json(res, 404, { ok: false, error: 'unknown sandbox' });
+        const host = fqdn();
+        const row = sandboxList(host).find((x) => x.name === name);
+        const cfg = loadSandbox(name);
+        const r = await run(['config', name, '--json'], 60000);
+        const settings = r.ok ? lastJson(r.stdout) : null;
+        // Tailscale and Paseo may come from a profile: use the resolved values.
+        const flag = (f) => settings?.flags?.find((x) => x.name === f)?.value ?? cfg[f];
+        const paseoUrl = host && flag('paseo') && cfg.tsPaseoPort ? `https://${host}:${cfg.tsPaseoPort}/` : null;
+        return json(res, 200, {
+          ...row,
+          connect: connectDetails({ ...cfg, tailscale: flag('tailscale') }, host, { paseoUrl }),
+          settings,
+          settingsError: r.ok ? null : r.output.split('\n').filter(Boolean).pop() || 'vivary config failed',
+          approval: pendingApproval(cfg, { validate: projectValidator(flagDefs()) }),
+        });
+      }
+
+      const action = p.match(/^\/api\/sandboxes\/([^/]+)\/(up|down|restart|recreate|settings|approve)$/);
       if (req.method === 'POST' && action) {
         const name = knownSandbox(decodeURIComponent(action[1]));
         if (!name) return json(res, 404, { ok: false, error: 'unknown sandbox' });
-        log(`${who} -> ${action[2]} ${name}`);
-        const r = await run([action[2], '--name', name]);
-        return json(res, r.ok ? 200 : 500, r);
+        const what = action[2];
+
+        if (what === 'settings') {
+          const argv = settingsArgv(name, body.changes);
+          // The raw request is what the passkey touch was made for.
+          await auth.consumeStepUp(session, 'settings', { name, changes: body.changes }, body.stepUp);
+          log(`${who} -> ${argv.slice(3).join(' ')} on ${name}`);
+          const r = await run(argv, 60000);
+          const result = r.ok ? lastJson(r.stdout) : null;
+          return json(res, r.ok ? 200 : 400, r.ok ? { ok: true, ...result } : { ok: false, error: lastLine(r.output) });
+        }
+
+        if (what === 'approve') {
+          const sha = String(body.sha || '');
+          if (!/^[0-9a-f]{64}$/.test(sha)) return json(res, 400, { ok: false, error: 'sha must be a sha256' });
+          await auth.consumeStepUp(session, 'config-approve', { name, sha }, body.stepUp);
+          log(`${who} -> approved .vivary.json ${sha.slice(0, 12)} on ${name}`);
+          const r = await run(['approve', name, '--sha', sha, '--json'], 60000);
+          return json(res, r.ok ? 200 : 409, r.ok ? { ok: true, ...lastJson(r.stdout) } : { ok: false, error: lastLine(r.output) });
+        }
+
+        // Recreate throws away whatever was installed inside the container.
+        if (what === 'recreate') await auth.consumeStepUp(session, 'recreate', { name }, body.stepUp);
+        log(`${who} -> ${what} ${name}`);
+        const steps = {
+          up: [['up', '--name', name]],
+          down: [['down', '--name', name]],
+          restart: [['down', '--name', name], ['up', '--name', name]],
+          recreate: [['down', '--name', name], ['up', '--name', name, '--recreate']],
+        }[what];
+        let out = '';
+        for (const [i, argv] of steps.entries()) {
+          const r = await run(argv);
+          out += `${out ? '\n' : ''}${r.output}`;
+          // `down` of a stopped sandbox is fine on the way to `up`.
+          if (!r.ok && !(i === 0 && steps.length > 1)) return json(res, 500, { ok: false, output: out });
+        }
+        return json(res, 200, { ok: true, output: out });
       }
 
       if (req.method === 'POST' && p === '/api/devices') {
@@ -410,6 +476,14 @@ export function createServer({
     server.on('upgrade', (req, socket) => socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'));
   }
   return server;
+}
+
+const lastLine = (text) => String(text || '').trim().split('\n').filter(Boolean).pop() || 'failed';
+
+// Plugin flag definitions, when this process has the plugins (the CLI does;
+// a test server may not) — only used to flag an invalid project file early.
+function flagDefs() {
+  return pluginsLoaded() ? pluginFlagDefs() : null;
 }
 
 function parseJson(text) {

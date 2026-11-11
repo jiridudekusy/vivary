@@ -17,6 +17,7 @@ import {
 } from './core/lifecycle.mjs';
 import { cmdStats } from './core/stats.mjs';
 import { cmdConfig, cmdProfile } from './core/config-cmd.mjs';
+import { cmdApprove, cmdSet } from './core/settings-cmd.mjs';
 import { loadMemoryBudget } from './core/config.mjs';
 
 function help(launchers) {
@@ -60,7 +61,14 @@ Commands:
                        (implies 'up' when needed; --editor <bin> to force).
   ls | list            List sandboxes across runtimes.
   config [name]        The sandbox's settings as its next start resolves them,
-                       each with the layer it came from.
+                       each with the layer it came from (--json for scripts).
+  set [name] --memory 8g --headed=off --profile a,b ...
+                       Change the sandbox's own settings without starting it,
+                       and say what that takes: nothing, the next start, a
+                       restart, or a --recreate. Not for --publish/--volume.
+  approve [name]       Review and approve the workspace's .vivary.json without
+                       starting the sandbox (--sha <sha256>: approve exactly
+                       that content, non-interactively).
   profile [ls]         Named profiles (~/.vivary/profiles/<name>.json — same
   profile show <name>  keys as .vivary.json) and the sandboxes that use them.
   stats [--trim] [--json]
@@ -191,6 +199,12 @@ async function main() {
       break;
     case 'config':
       cmdConfig(rest);
+      break;
+    case 'set':
+      await cmdSet(rest);
+      break;
+    case 'approve':
+      await cmdApprove(rest);
       break;
     case 'profile':
     case 'profiles':

@@ -332,6 +332,14 @@ Decisions:
 - **UI stays build-free**: plain ES modules served by the web server, strict CSP
   (no inline script). React is not needed without the approval inbox.
 
+Status (2026-11-11): (1), (2) and (3) built and verified end to end; (4) open.
+Step 3 as built: changes go through new CLI commands run as child processes —
+`vivary set` (the sandbox's own layer; refuses what `.vivary.json` decides and
+the host-access list flags; says next-start / restart / recreate) and
+`vivary approve --sha` (approves exactly the reviewed content) — each behind a
+step-up bound to the request; recreate takes one too. The project file is read
+with O_NOFOLLOW (a symlink to a key must not end up in the browser as a diff).
+
 Order: (1) passkey + HTTPS, (2) VNC through the web, (3) connection details, settings,
 `.vivary.json` approval from the web, (4) vault for vivary's own secrets: broker tokens
 (host keeps a verifier; the token reaches the sandbox per start into tmpfs, not env — today
