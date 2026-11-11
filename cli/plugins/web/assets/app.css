@@ -1,0 +1,198 @@
+/* vivary web — styles. Served as a file: the CSP allows no inline style. */
+/* Design tokens lifted from approval-mcp-wrapper (apps/web/src/styles.css) so
+   the two tools read as one product. Their app switches theme via
+   [data-theme='dark']; a phone has no such switch here, so the same dark values
+   are also bound to prefers-color-scheme. */
+@font-face{font-family:Roboto;src:url('/assets/fonts/latin-ext-normal.woff2') format('woff2');
+  font-style:normal;font-weight:100 900;font-display:swap}
+@font-face{font-family:'Roboto Mono';src:url('/assets/fonts/latin-ext-400-normal.woff2') format('woff2');
+  font-weight:400;font-display:swap}
+@font-face{font-family:'Roboto Mono';src:url('/assets/fonts/latin-700-normal.woff2') format('woff2');
+  font-weight:700;font-display:swap}
+
+:root{
+  color-scheme:light;
+  --primary:#2563eb; --primary-hover:#1d4ed8; --primary-text:#1d4ed8;
+  --primary-ultra:#eff6ff; --primary-soft:#dbeafe;
+  --positive:#15803d; --warning:#c2410c; --negative:#b91c1c;
+  --surface:#ffffff; --surface-soft:#f8fafc; --ground:#f3f6fb;
+  --fg:#172033; --fg-strong:#0f172a; --muted:#64748b; --muted-strong:#475569;
+  --line:#d8e0ea; --line-soft:#e9eef5;
+  --pos-soft:#ecfdf3; --warn-soft:#fff7ed; --neg-soft:#fef2f2;
+  --shadow-sm:0 1px 2px rgb(15 23 42 / .05);
+  --shadow-md:0 8px 24px rgb(15 23 42 / .08);
+  --shadow-lg:0 24px 64px rgb(15 23 42 / .22);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    color-scheme:dark;
+    --primary:#60a5fa; --primary-hover:#93c5fd; --primary-text:#93c5fd;
+    --primary-ultra:rgb(59 130 246 / .12); --primary-soft:rgb(59 130 246 / .2);
+    --positive:#4ade80; --warning:#fb923c; --negative:#f87171;
+    --surface:#121a28; --surface-soft:#0f1724; --ground:#0b111b;
+    --fg:#dce5f1; --fg-strong:#f8fafc; --muted:#8fa0b7; --muted-strong:#b4c1d1;
+    --line:#2b394c; --line-soft:#202c3c;
+    --pos-soft:rgb(34 197 94 / .12); --warn-soft:rgb(249 115 22 / .12);
+    --neg-soft:rgb(239 68 68 / .12);
+    --shadow-sm:0 1px 2px rgb(0 0 0 / .24);
+    --shadow-md:0 10px 28px rgb(0 0 0 / .24);
+    --shadow-lg:0 28px 72px rgb(0 0 0 / .5);
+  }
+}
+
+*{box-sizing:border-box}
+html{background:var(--ground);-webkit-text-size-adjust:100%}
+body{
+  margin:0;min-height:100vh;background:var(--ground);color:var(--fg);
+  font:400 14px/1.5 Roboto,Arial,sans-serif;font-synthesis:none;text-rendering:optimizeLegibility;
+  padding:max(18px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right))
+          max(32px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));
+  max-width:760px;margin-inline:auto;
+}
+button,input,textarea{font:inherit;color:inherit}
+
+.topbar{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}
+h1{margin:0;font-size:21px;font-weight:700;color:var(--fg-strong);letter-spacing:-.01em}
+#host{font:400 11px/1.4 'Roboto Mono',monospace;color:var(--muted);text-align:right;word-break:break-all;min-width:0}
+#fleet{margin:0 0 18px;color:var(--muted);font-size:13px}
+#fleet b{color:var(--fg-strong);font-weight:700}
+
+.card{
+  border:1px solid var(--line);border-radius:14px;background:var(--surface);
+  padding:16px;box-shadow:var(--shadow-sm);margin-bottom:12px;
+}
+.head{display:flex;align-items:center;gap:9px;margin-bottom:4px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.card.on .status-dot{background:var(--positive)}
+.name{font:700 15px/1.3 'Roboto Mono',monospace;color:var(--fg-strong);word-break:break-all;flex:1}
+.state{
+  flex:none;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700;
+  background:var(--surface-soft);color:var(--muted-strong);border:1px solid var(--line-soft);
+}
+.card.on .state{background:var(--pos-soft);color:var(--positive);border-color:transparent}
+.meta{margin:2px 0 0;font:400 12px/1.55 'Roboto Mono',monospace;color:var(--muted);word-break:break-all}
+
+.ssh{
+  display:flex;align-items:center;gap:10px;width:100%;margin-top:13px;text-align:left;
+  background:var(--primary-ultra);border:1px solid var(--primary-soft);border-radius:9px;
+  padding:11px 12px;min-height:44px;cursor:pointer;
+  font:400 12px/1.45 'Roboto Mono',monospace;color:var(--primary-text);word-break:break-all;
+}
+.ssh span{flex:1}
+.ssh svg{flex:none;width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;opacity:.75}
+.hint{margin:12px 0 0;padding:10px 12px;border-radius:9px;background:var(--warn-soft);
+  color:var(--warning);font-size:12.5px;line-height:1.5}
+
+.act{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  margin-top:13px;width:100%;min-height:44px;border-radius:9px;font-size:14px;font-weight:700;
+  border:1px solid var(--primary);background:var(--primary);color:#fff;
+  box-shadow:0 4px 12px rgb(37 99 235 / .2);
+}
+@media (prefers-color-scheme:dark){.act{color:#08111f}}
+.act.stop{background:var(--surface);color:var(--negative);border-color:rgb(185 28 28 / .35);box-shadow:none}
+.act[disabled]{opacity:.55}
+
+section{margin-top:26px}
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+h2{margin:0;font-size:13px;font-weight:700;color:var(--muted-strong);text-transform:uppercase;letter-spacing:.06em}
+#refresh{border:1px solid var(--line);background:var(--surface);border-radius:9px;
+  padding:0 12px;min-height:36px;font-size:12px;font-weight:700;color:var(--muted-strong)}
+
+.dev{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line-soft)}
+.dev-name{font:700 13px/1 'Roboto Mono',monospace;color:var(--fg-strong);flex:none}
+.dev-key{flex:1;font:400 11px/1 'Roboto Mono',monospace;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev button{border:0;background:none;color:var(--negative);font-size:19px;min-width:44px;min-height:44px}
+.empty{color:var(--muted);font-size:13px;margin:10px 0 0}
+
+form{margin-top:14px;display:grid;gap:10px}
+input,textarea{
+  width:100%;background:var(--surface);border:1px solid var(--line);border-radius:9px;
+  padding:11px 12px;min-height:44px;font:400 12.5px/1.45 'Roboto Mono',monospace;color:var(--fg);
+}
+textarea{resize:vertical;min-height:84px}
+::placeholder{color:var(--muted)}
+:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+form button{border:1px solid var(--primary);background:var(--primary);color:#fff;
+  border-radius:9px;min-height:44px;font-size:14px;font-weight:700;box-shadow:0 4px 12px rgb(37 99 235 / .2)}
+@media (prefers-color-scheme:dark){form button{color:#08111f}}
+
+#toast{
+  position:fixed;left:50%;transform:translateX(-50%) translateY(160%);
+  bottom:max(18px,env(safe-area-inset-bottom));z-index:9;max-width:min(92vw,460px);
+  padding:12px 15px;border-radius:11px;background:var(--surface);border:1px solid var(--line);
+  box-shadow:var(--shadow-lg);font-size:13px;line-height:1.45;color:var(--fg);
+  transition:transform .24s cubic-bezier(.2,.8,.2,1);
+}
+#toast.show{transform:translateX(-50%) translateY(0)}
+#toast.bad{background:var(--neg-soft);border-color:rgb(185 28 28 / .35);color:var(--negative)}
+@media (prefers-reduced-motion:reduce){#toast{transition:none}}
+
+/* --- login / enrollment / passkeys ------------------------------------- */
+[hidden]{display:none !important}
+.top-actions{display:flex;align-items:center;gap:8px;min-width:0;max-width:64%}
+.ghost{border:1px solid var(--line);background:var(--surface);border-radius:9px;
+  padding:0 12px;min-height:36px;font-size:12px;font-weight:700;color:var(--muted-strong);cursor:pointer}
+.gate{margin-top:28px;text-align:left}
+.gate h2{text-transform:none;letter-spacing:0;font-size:18px;color:var(--fg-strong);margin-bottom:6px}
+.gate p{margin:8px 0 0;color:var(--muted-strong);line-height:1.55}
+.gate code{font:400 12.5px/1.4 'Roboto Mono',monospace;background:var(--surface-soft);
+  border:1px solid var(--line-soft);border-radius:6px;padding:1px 6px;color:var(--fg-strong)}
+.gate .act{margin-top:18px}
+.gate a{color:var(--primary-text);word-break:break-all}
+.gate input{margin-top:14px}
+.pk{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line-soft)}
+.pk-main{flex:1;min-width:0}
+.pk-name{font:700 13px/1.3 'Roboto Mono',monospace;color:var(--fg-strong)}
+.pk-meta{font-size:11.5px;color:var(--muted);margin-top:2px}
+.pk-tag{display:inline-block;margin-left:6px;border-radius:999px;padding:1px 7px;font-size:10.5px;font-weight:700;
+  background:var(--pos-soft);color:var(--positive);vertical-align:1px}
+.pk button{border:0;background:none;color:var(--negative);font-size:19px;min-width:44px;min-height:44px;cursor:pointer}
+.row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.row-actions .ghost{min-height:44px}
+
+/* The screen link sits above Start/Stop: a quieter, outlined button. */
+a.act{text-decoration:none}
+.act.screen{background:var(--surface);color:var(--primary-text);box-shadow:none}
+
+/* --- one sandbox (#/s/<name>) --- */
+a.name{text-decoration:none;color:var(--fg-strong)}
+a.name:hover{text-decoration:underline}
+.badge{display:inline-block;margin-top:8px;padding:3px 9px;border-radius:999px;font-size:12px;text-decoration:none}
+.badge.warn{background:var(--warn-soft);color:var(--warning)}
+.detail .back{display:inline-block;margin:2px 0 12px;color:var(--primary-text);text-decoration:none;font-weight:600}
+.detail .block{margin-top:22px}
+.detail h3{margin:16px 0 6px;font-size:13px;color:var(--fg-strong)}
+.detail .quiet,.hint.quiet{color:var(--muted);background:none;padding:0;margin:8px 0 0;font-size:12.5px}
+.detail .kv{margin-top:8px}
+.detail .kv .k{font-size:12px;color:var(--muted);margin-bottom:4px}
+.detail .block-pre,.detail .diff{
+  margin:0 0 6px;padding:10px 12px;border-radius:9px;background:var(--surface);border:1px solid var(--line);
+  font:400 12px/1.5 'Roboto Mono',monospace;white-space:pre-wrap;word-break:break-all;color:var(--fg)}
+.detail .diff .add{color:var(--positive)}
+.detail .diff .del{color:var(--negative)}
+.detail .ide{display:flex;gap:14px;margin-top:8px;font-size:13px}
+.detail .ide a{color:var(--primary-text);font-weight:600;text-decoration:none}
+.detail .warn-block{padding:12px 14px;border-radius:12px;background:var(--warn-soft)}
+.detail .warn-block h2{color:var(--warning)}
+.detail .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.detail label{display:block;font-size:12px;color:var(--muted)}
+.detail .row2 input{display:block;width:100%;margin-top:4px;padding:9px 10px;border-radius:9px;border:1px solid var(--line);
+  background:var(--surface);font-size:16px}
+.detail .toggles{display:flex;flex-direction:column;gap:2px}
+.detail .toggle{display:flex;align-items:flex-start;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line-soft);color:var(--fg)}
+.detail .toggle input{margin-top:3px;width:18px;height:18px;flex:none}
+.detail .t-main{display:flex;flex-direction:column;min-width:0}
+.detail .t-name{font:600 13.5px/1.3 'Roboto Mono',monospace;color:var(--fg-strong)}
+.detail .t-name .val{font-weight:400;color:var(--muted)}
+.detail .t-help{font-size:12px;color:var(--muted)}
+.detail .src{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:11px;
+  background:var(--primary-ultra);color:var(--primary-text);vertical-align:1px}
+.detail .ghost-act{background:var(--surface);color:var(--fg);border-color:var(--line);box-shadow:none}
+.detail .act.danger{background:var(--surface);color:var(--negative);border-color:rgb(185 28 28 / .35);box-shadow:none}
+.detail .row-actions .act{width:auto;flex:1;margin-top:0}
+.detail .small{min-height:32px;padding:4px 10px;font-size:12.5px}
+.detail .effect{margin-top:12px;padding:10px 12px;border-radius:9px;background:var(--primary-ultra)}
+.detail .effect.recreate{background:var(--warn-soft)}
+.detail .effect p{margin:0 0 6px}

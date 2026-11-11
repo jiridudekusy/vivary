@@ -1,45 +1,47 @@
-// headed: sticky, password-protected noVNC, a stable 127.0.0.1 port on docker,
-// live start on Apple `container` (so it stays out of the generic snapshot).
+// headed: sticky; the screen opens in vivary web (no URL with a port, no
+// password anywhere); the GUI starts live, so the flag stays out of the
+// container snapshot — except as an echo for containers that recorded it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import os from 'node:os';
-import path from 'node:path';
-import headed, { accessLines, generateVncPassword, novncUrl, tailnetUrl } from '../plugins/headed/plugin.mjs';
+import headed, { screenLines } from '../plugins/headed/plugin.mjs';
 import { parseServePorts, tailnetPortFree } from '../plugins/tailscale/plugin.mjs';
 import { containerConfigSnapshot, diffContainerConfig } from '../core/sandbox.mjs';
 
-test('VNC passwords: 8 chars (VNC truncates there), no look-alike characters', () => {
-  for (let i = 0; i < 200; i++) {
-    const pw = generateVncPassword();
-    assert.equal(pw.length, 8);
-    assert.doesNotMatch(pw, /[0O1lIi2Z5S6G8Bo]/);
-  }
-  let n = 0;
-  assert.equal(generateVncPassword(() => n++ % 3), 'abcabcab');
+test('the screen opens in vivary web: its running address, else the one it will have', () => {
+  const info = { origin: 'https://mac.tail1.ts.net:8737' };
+  assert.deepEqual(screenLines('findmy', { info, fqdn: () => 'x' }), ['https://mac.tail1.ts.net:8737/vnc/findmy']);
+  assert.deepEqual(screenLines('findmy', { info: null, fqdn: () => 'mac.tail1.ts.net' }),
+    ['https://mac.tail1.ts.net:8737/vnc/findmy', 'vivary web is not running — start it with: vivary web']);
+  assert.equal(screenLines('a b', { info: null, fqdn: () => null })[0], 'http://localhost:7378/vnc/a%20b');
 });
 
-test('noVNC URL: container DNS on Apple, localhost:<port> on docker — never the password', () => {
-  assert.equal(novncUrl({ runtime: 'container', cname: 'claude-sandbox-findmy', domain: 'mac.local', password: 'secret12' }),
-    'http://claude-sandbox-findmy.mac.local:6080/vnc.html?autoconnect=true&resize=scale');
-  assert.equal(novncUrl({ runtime: 'docker', cname: 'x', domain: '', port: 6081, password: 'secret12' }),
-    'http://localhost:6081/vnc.html?autoconnect=true&resize=scale');
+test('nothing secret in the container\'s environment any more', async () => {
+  assert.deepEqual(await headed.runArgs({ cfg: { name: 'x', runtime: 'docker' }, cname: 'c' }), []);
+  assert.deepEqual(await headed.runArgs({ cfg: { name: 'x', runtime: 'container', headed: true }, cname: 'c' }),
+    ['-e', 'HEADED=1']);
+  assert.deepEqual(await headed.runArgs({ cfg: { name: 'x', runtime: 'docker', headed: true }, cname: 'c' }),
+    ['-e', 'HEADED=1']);
 });
 
-test('only the password FILE is shown, on a line of its own after every URL', () => {
-  const file = path.join(os.homedir(), '.vivary', 'findmy', 'vnc-password');
-  assert.deepEqual(accessLines('http://localhost:6080/vnc.html', file),
-    ['http://localhost:6080/vnc.html', 'password: in ~/.vivary/findmy/vnc-password']);
-  assert.deepEqual(accessLines(['http://a', 'https://b'], '/x/pw'), ['http://a', 'https://b', 'password: in /x/pw']);
-});
-
-test('tailnet URL: HTTPS on the host FQDN and the share port, no password', () => {
-  assert.equal(tailnetUrl('mac.tail1.ts.net', 8701), 'https://mac.tail1.ts.net:8701/vnc.html?autoconnect=true&resize=scale');
-});
-
-test('the publish is baked (in the snapshot) on docker, and on Apple only with --tailscale', () => {
+test('headed is sticky and starts live: turning it on is no config change on either runtime', () => {
+  assert.equal(headed.flags.headed.sticky, true);
   const snap = (cfg) => containerConfigSnapshot({ workspace: '/w', ...cfg }, {}, [headed]);
-  assert.equal(snap({ runtime: 'container', tailscale: true, headed: true }).headed, true);
-  assert.equal(snap({ runtime: 'container', tailscale: false, headed: true }).headed, undefined);
+  for (const runtime of ['docker', 'container']) {
+    assert.equal(snap({ runtime, headed: true }).headed, undefined, runtime);
+    assert.deepEqual(diffContainerConfig(snap({ runtime }), snap({ runtime, headed: true })), [], runtime);
+  }
+});
+
+test('a container that recorded headed in its snapshot is not refused over that alone', () => {
+  const snap = (cfg) => containerConfigSnapshot({ workspace: '/w', ...cfg }, {}, [headed]);
+  // findmy: docker, created with the old noVNC publish baked in
+  const saved = { ...snap({ runtime: 'docker' }), headed: true };
+  for (const on of [true, false]) {
+    assert.deepEqual(diffContainerConfig(saved, snap({ runtime: 'docker', headed: on, containerConfig: saved })), []);
+  }
+  // an Apple sandbox that recorded headed:false (with --tailscale) — same
+  const apple = { ...snap({ runtime: 'container' }), headed: false };
+  assert.deepEqual(diffContainerConfig(apple, snap({ runtime: 'container', headed: true, containerConfig: apple })), []);
 });
 
 test('tailnet ports: those tailscale serve already uses are never handed out', async () => {
@@ -48,19 +50,4 @@ test('tailnet ports: those tailscale serve already uses are never handed out', a
   const free = tailnetPortFree(new Set([6768]), async () => true);
   assert.equal(await free(6768), false);
   assert.equal(await free(6769), true);
-});
-
-test('headed is sticky, and in the snapshot only where it is baked in (docker)', () => {
-  assert.equal(headed.flags.headed.sticky, true);
-  const snap = (cfg) => containerConfigSnapshot({ workspace: '/w', ...cfg }, {}, [headed]);
-  assert.equal(snap({ runtime: 'docker', headed: true }).headed, true);
-  assert.equal(snap({ runtime: 'container', headed: true }).headed, undefined);
-  // turning it on for a kept Apple container is not a config change — postUp starts it live
-  assert.deepEqual(diffContainerConfig(snap({ runtime: 'container' }), snap({ runtime: 'container', headed: true })), []);
-  assert.deepEqual(diffContainerConfig(snap({ runtime: 'docker' }), snap({ runtime: 'docker', headed: true })),
-    [{ key: 'headed', from: false, to: true }]);
-});
-
-test('runArgs: nothing without the flag', async () => {
-  assert.deepEqual(await headed.runArgs({ cfg: { name: 'x', runtime: 'docker' }, cname: 'c' }), []);
 });

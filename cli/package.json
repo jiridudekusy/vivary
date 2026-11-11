@@ -15,5 +15,10 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@novnc/novnc": "1.7.0",
+    "@simplewebauthn/server": "13.3.2",
+    "ws": "8.22.2"
   }
 }

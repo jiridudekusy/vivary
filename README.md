@@ -5,7 +5,8 @@
 Run AI coding agents (Claude Code, Codex, Cursor) in isolated containers — **Docker**
 or **Apple `container`** — while keeping host-level convenience: shared chat
 history, one-time login, imported settings/skills/MCP, a browser the agent can
-drive (headless or visible via noVNC), and SSH access for Claude Desktop.
+drive (headless, or watched and driven in the passkey-protected web UI), and SSH
+access for Claude Desktop.
 
 ```bash
 cd ~/work/myproj
@@ -15,6 +16,7 @@ slaude               # sandboxed Claude Code for this project. That's it.
 ## Install
 
 ```bash
+npm install --prefix cli     # the CLI's one dependency (passkeys for `vivary web`)
 vivary build                 # compose + build the image
 npm install -g ./cli         # installs the `vivary`, `slaude`, `sodex` and `sursor` commands
 ```
@@ -35,6 +37,12 @@ vivary up [name]            long-running container with sshd (Claude Desktop, ID
 vivary down [name]          stop the long-running container
 vivary ls                   list sandboxes across both runtimes
 vivary config [name]        the sandbox's settings and where each one comes from
+vivary set [name] --memory 8g --headed=off ...
+                         change the sandbox's own settings without starting it;
+                         says whether that takes the next start, a restart or
+                         a --recreate (not for --publish / --volume)
+vivary approve [name]       review and approve a changed .vivary.json without
+                         starting the sandbox
 vivary profile [ls|show p]  named profiles (~/.vivary/profiles/<p>.json) and
                          the sandboxes using them
 vivary stats [--trim]       how hard the VMs press on the Mac (RAM, CPU, open
@@ -57,8 +65,7 @@ Agent launchers (equivalent to `vivary start --agent ... -- args`):
 
 Common options: `--sudo` (full root in the sandbox), `--headed`, `--docker`, `--memory 8g`, `--cpus 6`, `--runtime
 docker|container`, `--name`, `--workspace`, `--agent`. Environment defaults:
-`SANDBOX_RUNTIME`, `SANDBOX_MEMORY`, `SANDBOX_CPUS`, `SANDBOXES_DIR`,
-`NOVNC_PORT`, `SSH_PORT`.
+`SANDBOX_RUNTIME`, `SANDBOX_MEMORY`, `SANDBOX_CPUS`, `SANDBOXES_DIR`, `SSH_PORT`.
 
 **Runtime selection**: chosen when the sandbox is created (`--runtime`, else
 `$SANDBOX_RUNTIME`, else autodetect — `container` wins if installed) and
@@ -91,7 +98,8 @@ defaults add to the list instead of replacing it; `dockerd` merges key by key.
 Turn an inherited flag off on one sandbox with `--<flag>=off`. CLI flags that
 extend the file are written back (union only — nothing is ever removed).
 Unknown keys fail loudly. `vivary config <name>` prints every setting with the
-layer it came from.
+layer it came from. A changed file blocks every start until it is approved —
+on a terminal at the next start, with `vivary approve <name>`, or in the web UI.
 
 `"dockerd"` is the daemon.json of the Docker inside a `--docker` sandbox —
 `insecure-registries`, `registry-mirrors`, `dns`, … (`hosts` is refused: it
@@ -139,15 +147,16 @@ core Dockerfile plus every plugin fragment — Ubuntu 24.04 with:
 | Java | Azul Zulu JDK 21 |
 | Build tools | Maven (apt), Gradle 8.14 |
 | Playwright | latest, global npm install, Chromium pre-installed (`/opt/pw-browsers`, agent-writable so projects can `npx playwright install`) |
-| GUI stack | Xvfb + openbox + x11vnc + noVNC (headed browser mode) |
+| GUI stack | Xvfb + openbox + x11vnc on the sandbox's loopback (headed browser mode) |
 | sshd | key-only, user `agent` (for Claude Desktop / IDE access) |
 
 Browser modes:
 
 - **Headless** (default): Playwright works out of the box.
-- **Headed**: `--headed` starts Xvfb (`:99`) + noVNC — watch and control the
-  browser from the host (URL is printed on start; run agent code with
-  `headless: false`).
+- **Headed**: `--headed` starts Xvfb (`:99`) + x11vnc — watch and control the
+  browser in `vivary web` (the address is printed on start, again with
+  `vivary headed <name>`; run agent code with `headless: false`). VNC is never
+  on the network: see *Screens* under the web UI.
 
 One image serves all agents — Claude can call Codex (`codex exec ...`) and
 vice versa within the same sandbox.
@@ -342,6 +351,76 @@ Desktop injects its own client-side connectors (e.g. Claude in Chrome) that
 execute **on the host** — disable them in Desktop settings if you want the
 session fully contained. Plain CLI sessions (`slaude`, `vivary start`) have no
 host-side channel at all.
+
+## Web UI (`vivary web`)
+
+A phone-sized page for the sandboxes on this Mac: what runs, how to connect,
+start/stop, and the SSH device keys (`vivary key`). It listens on loopback only
+and is shared to your tailnet with `tailscale serve --https` (HTTPS
+certificates must be enabled in the Tailscale admin console).
+
+```bash
+vivary web                   # serves https://<mac>.<tailnet>.ts.net:8737/
+vivary web enroll            # (another terminal, on the Mac) register a passkey
+vivary web --stop            # stop sharing to the tailnet
+```
+
+Login is a **passkey** (Face ID / Touch ID / PIN, always with user
+verification). Passkeys need a secure context, so HTTPS on the tailnet name —
+plain HTTP works only on `localhost` (`--no-serve`, which then has passkeys of
+its own). A passkey belongs to one address: use the `ts.net` one on the Mac too.
+
+- **First passkey, and recovery:** only `vivary web enroll` on the Mac. It opens
+  the page with a one-time token in the URL fragment (one use, 10 minutes) and
+  prints nothing. With iCloud Keychain the passkey reaches your iPhone and iPad.
+  There are no recovery codes: physical access to the Mac is the way back in.
+- **Sessions:** 12 h, `__Host-` cookie (HttpOnly, Secure, SameSite=Strict),
+  CSRF token on every change, in memory only — restarting `vivary web` signs
+  everyone out. "Sign out everywhere" in the page does the same.
+- **Step-up:** adding an SSH device key and adding or removing a passkey ask for
+  a fresh passkey touch, bound to that exact request (a touch for one key cannot
+  be spent on another).
+- Every API call needs a session, loopback included — a docker-runtime sandbox
+  can reach the host's loopback through `host.docker.internal`. The tailnet
+  allowlist (`~/.vivary/web-allow`, default: the tailnet owner) still applies on
+  top. Stored in `~/.vivary/.web/`: public keys and the hash of a pending
+  enrollment token — no secret.
+- Not offered from the web: creating a sandbox, changing its workspace or
+  mounts (raw access to the Mac's disk).
+
+**One sandbox** (tap its name): how to get in — the `ssh` line for the
+tailnet and for this Mac, a `~/.ssh/config` block, *Open in Cursor / VS Code*
+links, the Paseo address (never its password) — then its settings, and
+Start / Stop / Restart / Recreate.
+
+- **Settings** are memory, CPUs, profiles and the on/off features. Saving asks
+  for a passkey touch made for exactly that change and runs `vivary set`; the
+  page then says what it takes: the next start, a restart, or a rebuild of the
+  container (which loses what was installed inside — that takes a touch too).
+  Settings that `.vivary.json` decides are shown, not editable: change the file.
+  Never from the web: the workspace, `--volume`, `--publish`.
+- **`.vivary.json` approval:** a changed project file shows as a diff against
+  the approved copy. *Approve* takes a touch bound to the sha256 of exactly
+  that content, so a file changed after you looked is refused. The page reads
+  the file without following a symlink and only if it is a small regular file.
+
+**Screens** (`--headed` sandboxes): *Open screen* on a running sandbox's card,
+or `https://<mac>.<tailnet>.ts.net:8737/vnc/<name>`. The viewer is noVNC's
+client library (npm `@novnc/novnc`, pinned), served by the web from the Mac;
+on a phone it has a keyboard button plus Esc/Tab/Ctrl and a text box that types
+into the sandbox or puts text on its clipboard. The way in is the same session:
+
+- x11vnc listens on the sandbox's `127.0.0.1` only, without a password. The
+  web runs `container exec -i <container> vnc-relay` (or `docker exec`) per
+  viewer and carries the VNC stream over the runtime's exec channel. Nothing
+  listens on any network for VNC, so another sandbox has nothing to connect
+  to, and there is no password or token to store, print or leak.
+- The WebSocket needs the session cookie and the web's own `Origin`; a screen
+  closes within seconds of sign-out, "sign out everywhere", removal of its
+  passkey or the 12 h limit.
+- Needs the current image: a container made before this still serves noVNC
+  on its network with the old 8-character password. `vivary up <name>` says
+  so; `vivary up <name> --recreate` moves it over.
 
 ## Security boundary
 
