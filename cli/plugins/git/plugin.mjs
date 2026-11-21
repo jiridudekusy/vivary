@@ -31,7 +31,7 @@ import {
   PackEnd, capabilityInjector, denialText, findEntry, judgePush, mergePolicy, objectFormatOf, parsePushCommands,
   rejectReport, repoKey, transportFor, pkt,
 } from './policy.mjs';
-import { MAX_PUSH_BODY, Spool, notFastForward } from './pushcheck.mjs';
+import { MAX_PUSH_BODY, Spool, historyCacheDir, notFastForward } from './pushcheck.mjs';
 
 const BROKER_IN_SANDBOX = 'http://host.docker.internal:7377';
 const MAX_PUSH_HEAD = 1 << 20; // the command list of a push; refs, not packs
@@ -106,7 +106,12 @@ function errAdvertisement(res, service, msg) {
   res.end(Buffer.concat([pkt(`ERR ${msg}\n`)]));
 }
 
-export function makeHttpHandler({ policyFor = gitPolicy, credential = macCredential, request = https.request, upstreamBase } = {}) {
+// Where the server's history is kept for the fast-forward check (pushcheck.mjs).
+const historyCache = (dir, key) => `${path.join(dir || historyCacheDir(), ...key.split('/'))}.git`;
+
+export function makeHttpHandler({
+  policyFor = gitPolicy, credential = macCredential, request = https.request, upstreamBase, historyDir,
+} = {}) {
   return function brokerRaw({ req, res, log, sandboxByToken }) {
     const url = new URL(req.url, 'http://broker');
     const m = url.pathname.match(ROUTE);
@@ -228,10 +233,15 @@ export function makeHttpHandler({ policyFor = gitPolicy, credential = macCredent
       req.on('error', () => spool.dispose());
       req.on('end', async () => {
         spool.close();
-        const r = await notFastForward(spool.file, parsed.end, verdict.ancestry, { objectFormat: objectFormatOf(parsed.caps) });
+        // The Mac's own git asks the server: its credential helper, the account as user name.
+        const url = upstreamBase ? `${upstreamBase}/${rawPath}`
+          : `https://${entry.account ? `${encodeURIComponent(entry.account)}@` : ''}${host}/${rawPath}`;
+        const r = await notFastForward(spool.file, parsed.end, verdict.ancestry, {
+          objectFormat: objectFormatOf(parsed.caps), server: { cache: historyCache(historyDir, key), url },
+        });
         if (r.error) { spool.dispose(); return reject(verdict.ancestry.map((c) => ({ ref: c.ref, why: 'check', note: r.error }))); }
         if (r.bad.length) { spool.dispose(); return reject(r.bad.map((c) => ({ ref: c.ref, why: 'force' }))); }
-        log(`GIT ${sandbox.name} push ${key} ${refs} (fast-forward checked)`);
+        log(`GIT ${sandbox.name} push ${key} ${refs} (fast-forward checked${r.asked ? ', asked the server' : ''})`);
         return forward({ spool });
       });
       req.resume();
@@ -257,7 +267,12 @@ export const frame = (type, data) => {
 
 const SSH_COMMAND = /^(git-upload-pack|git-receive-pack) '([^']+)'$/;
 
-export function makeSshHandler({ policyFor = gitPolicy, sshSpawn = (args) => spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] }) } = {}) {
+const sshUrl = ({ user, host, port, rawPath }) => `ssh://${user}@${host}:${port}${rawPath.startsWith('/') ? '' : '/~/'}${rawPath}`;
+
+export function makeSshHandler({
+  policyFor = gitPolicy, sshSpawn = (args) => spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] }),
+  serverUrl = sshUrl, historyDir,
+} = {}) {
   return function brokerUpgrade({ req, socket, head, sandbox, log }) {
     if (new URL(req.url, 'http://broker').pathname !== '/git-ssh') return false;
     const refuse = (code, msg) => {
@@ -352,13 +367,16 @@ export function makeSshHandler({ policyFor = gitPolicy, sshSpawn = (args) => spa
         socket.off('data', onPack);
         socket.pause();
         spool.close();
-        const r = await notFastForward(spool.file, parsed.end, verdict.ancestry, { objectFormat: objectFormatOf(parsed.caps) });
+        const r = await notFastForward(spool.file, parsed.end, verdict.ancestry, {
+          objectFormat: objectFormatOf(parsed.caps),
+          server: { cache: historyCache(historyDir, key), url: serverUrl({ user, host, port, rawPath }) },
+        });
         if (r.error || r.bad.length) {
           spool.dispose();
           return reject(r.error ? verdict.ancestry.map((c) => ({ ref: c.ref, why: 'check', note: r.error }))
             : r.bad.map((c) => ({ ref: c.ref, why: 'force' })));
         }
-        log(`GIT ${sandbox.name} push ${key} ${refs} (ssh, fast-forward checked)`);
+        log(`GIT ${sandbox.name} push ${key} ${refs} (ssh, fast-forward checked${r.asked ? ', asked the server' : ''})`);
         const rs = fs.createReadStream(spool.file);
         rs.pipe(child.stdin, { end: false });
         rs.on('end', () => { spool.dispose(); socket.pipe(child.stdin); });

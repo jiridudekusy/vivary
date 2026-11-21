@@ -270,16 +270,21 @@ export function parseBatchCommits(buf) {
   return parents;
 }
 
-// Does `from` reach `to` through commits in `parents` (the pushed pack)?
-export function reaches(parents, from, to) {
+// Walk from `from` through the commits in `parents` (the pushed pack) looking
+// for `to`. { reached, exits }: exits = commits the walk ran into that are NOT
+// in the pack — the server already has them, and only it knows whether `to`
+// is behind one of them (`from` itself, when the pack does not hold it).
+export function walkPack(parents, from, to) {
   const seen = new Set();
+  const exits = new Set();
   const todo = [from];
   while (todo.length) {
     const c = todo.pop();
-    if (c === to) return true;
-    if (seen.has(c) || !parents.has(c)) continue;
+    if (c === to) return { reached: true, exits: new Set() };
+    if (seen.has(c)) continue;
     seen.add(c);
+    if (!parents.has(c)) { exits.add(c); continue; }
     todo.push(...parents.get(c));
   }
-  return false;
+  return { reached: false, exits };
 }

@@ -447,11 +447,14 @@ but no git credential ever enters the sandbox: the Mac does the talking.
 - How a fast-forward is proven without a copy of the repository: the broker
   asks git for a self-contained pack (`no-thin`), indexes it in a throwaway
   repository on the Mac (git computes every object's name from its content)
-  and walks the new commits' parents to the old tip. The sandbox's own `.git`
-  is never trusted for this — the agent can rewrite it. One honest false
-  alarm: moving a branch onto a commit the server already has
-  (`git push origin main:agent/x` when agent/x is behind) cannot be proven
-  from the push and is refused as a rewrite.
+  and walks the new commits' parents to the old tip. When the walk runs into
+  commits the server already has (the branch was merged into main and the
+  agent goes on from main; `git push origin main:agent/x` when agent/x is
+  behind), the broker asks the server: it keeps a commits-only copy
+  (`--filter=tree:0`; a full one where the server cannot filter) of the
+  repository's branches and tags in `~/.vivary/.git-cache`, fetched with the
+  Mac's own credentials. The sandbox's own `.git` is never trusted for this —
+  the agent can rewrite it.
 - **HTTPS hosts** (github.com, gitlab.com, bitbucket.org): the sandbox's git
   is rewritten to the broker (`https://`, `git@host:` and `ssh://` spellings),
   which adds the Mac's own credential from `git credential` (gh, Keychain).

@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 
 const { makeHttpHandler, makeSshHandler, sandboxGitconfig } = await import('../plugins/git/plugin.mjs');
 const {
-  PackEnd, capabilityInjector, findEntry, judgePush, parseBatchCommits, parsePushCommands, reaches, refAllowed, repoKey,
+  PackEnd, capabilityInjector, findEntry, judgePush, parseBatchCommits, parsePushCommands, walkPack, refAllowed, repoKey,
   validateGitConfig, mergePolicy, pkt, FLUSH,
 } = await import('../plugins/git/policy.mjs');
 
@@ -33,6 +33,7 @@ for (const repo of ['owner/repo.git', 'owner/other.git', 'awid/name.git']) {
   const dir = path.join(ROOT, repo);
   fs.mkdirSync(dir, { recursive: true });
   git(['init', '-q', '--bare', '-b', 'main', dir]);
+  git(['--git-dir', dir, 'config', 'uploadpack.allowFilter', 'true']);
 }
 const seed = path.join(TMP, 'seed');
 git(['init', '-q', '-b', 'main', seed]);
@@ -92,6 +93,7 @@ const brokerRaw = makeHttpHandler({
   credential: () => ({ username: 'mac-user', password: 'mac-secret' }),
   request: http.request,
   upstreamBase: `http://127.0.0.1:${upstream.address().port}`,
+  historyDir: path.join(TMP, 'history'),
 });
 const brokerUpgrade = makeSshHandler({
   policyFor: () => POLICY,
@@ -100,6 +102,8 @@ const brokerUpgrade = makeSshHandler({
     const [, service, p] = args.at(-1).match(/^(\S+) '(.+)'$/);
     return spawn(service, [path.join(ROOT, p.replace(/^\//, ''))], { stdio: ['pipe', 'pipe', 'pipe'] });
   },
+  serverUrl: ({ rawPath }) => `file://${path.join(ROOT, rawPath)}`,
+  historyDir: path.join(TMP, 'history'),
 });
 const broker = http.createServer((req, res) => {
   if (!brokerRaw({ req, res, log, sandboxByToken })) { res.writeHead(404); res.end(); }
@@ -237,6 +241,42 @@ for (const [label, url, repo] of [
     assert.equal((await sbx(['push', 'origin', ':refs/heads/agent/scratch/x'], dir)).status, 0);
     assert.ok(!upstreamHas(repo, 'refs/heads/agent/scratch/x'));
   });
+
+  test(`${label}: a fast-forward over commits only the server has is confirmed by the server`, async () => {
+    const dir = path.join(TMP, `srv-${label}`);
+    assert.equal((await sbx(['clone', '-q', url, dir])).status, 0);
+    await commit(dir, 'feature');
+    assert.equal((await sbx(['push', 'origin', 'HEAD:refs/heads/agent/merged'], dir)).status, 0);
+    const feat = (await sbx(['rev-parse', 'HEAD'], dir)).out.trim();
+    // as a PR merge would: on the server, main takes the branch and moves on
+    const side = path.join(TMP, `side-${label}`);
+    git(['clone', '-q', path.join(ROOT, repo), side]);
+    git(['-C', side, 'fetch', '-q', 'origin', 'agent/merged']);
+    git(['-C', side, '-c', 'user.name=t', '-c', 'user.email=t@t', 'merge', '-q', '--no-ff', '-m', 'merge PR', 'FETCH_HEAD']);
+    assert.equal(git(['-C', side, 'push', '-q', 'origin', 'main']).status, 0);
+    // the agent goes on from main on the same branch: its commit's parent is
+    // the merge, which the server has and the pack therefore does not carry
+    await sbx(['fetch', '-q', 'origin'], dir);
+    await sbx(['checkout', '-q', '-B', 'cont', 'origin/main'], dir);
+    await commit(dir, 'continued');
+    const cont = await sbx(['push', 'origin', 'HEAD:refs/heads/agent/merged'], dir);
+    assert.equal(cont.status, 0, cont.out);
+    assert.ok(logs.some((l) => l.includes('agent/merged') && l.includes('asked the server')));
+    // a branch behind main moved onto it: the pack is empty
+    assert.equal((await sbx(['push', 'origin', `${feat}:refs/heads/agent/behind`], dir)).status, 0);
+    const mv = await sbx(['push', 'origin', 'origin/main:refs/heads/agent/behind'], dir);
+    assert.equal(mv.status, 0, mv.out);
+    // and a rewrite the server's history exposes
+    const back = await sbx(['push', '--force', 'origin', 'origin/main:refs/heads/agent/merged'], dir);
+    assert.notEqual(back.status, 0);
+    assert.match(back.out, /agent\/merged: not a fast-forward/);
+    // the Mac's copy of the server's history holds commits, no file contents
+    const key = repoKey(new URL(url).hostname, new URL(url).pathname);
+    const kinds = git(['--git-dir', `${path.join(TMP, 'history', ...key.split('/'))}.git`, 'cat-file',
+      '--batch-all-objects', '--batch-check=%(objecttype)']).stdout;
+    assert.match(kinds, /commit/);
+    assert.doesNotMatch(kinds, /blob/);
+  });
 }
 
 test('push rules and the wire helpers', () => {
@@ -259,11 +299,13 @@ test('push rules and the wire helpers', () => {
   assert.throws(() => validateGitConfig([{ repo: 'h/a', force: 'x' }], 'f'), /'force' must be an array/);
 
   // the walk: merges, and a parent outside the pack ends that path
-  const parents = new Map([['c3', ['c2', 'm1']], ['c2', ['c1']], ['m1', ['outside']]]);
-  assert.ok(reaches(parents, 'c3', 'c1'));
-  assert.ok(reaches(parents, 'c3', 'outside'), 'the old tip itself may be outside the pack');
-  assert.ok(!reaches(parents, 'c3', 'elsewhere'));
-  assert.ok(!reaches(parents, 'unknown', 'c1'), 'a new tip not in the pack proves nothing');
+  const parents = new Map([['c3', ['c2', 'm1']], ['c2', ['c1']], ['c1', []], ['m1', ['outside']]]);
+  assert.ok(walkPack(parents, 'c3', 'c1').reached);
+  assert.ok(walkPack(parents, 'c3', 'outside').reached, 'the old tip itself may be outside the pack');
+  assert.deepEqual(walkPack(parents, 'c3', 'elsewhere'), { reached: false, exits: new Set(['outside']) },
+    'the walk names where it left the pack: the server decides there');
+  assert.deepEqual([...walkPack(parents, 'unknown', 'c1').exits], ['unknown'], 'a new tip not in the pack: ask about it');
+  assert.equal(walkPack(new Map([['r', []]]), 'r', 'x').exits.size, 0, 'unrelated history: nothing to ask');
   const batch = Buffer.from('c1 commit 34\ntree t\nparent p1\nparent p2\n\nmsg\nx missing\n');
   assert.deepEqual([...parseBatchCommits(batch)], [['c1', ['p1', 'p2']]]);
 

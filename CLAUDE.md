@@ -237,8 +237,15 @@ English, converse with the user in Czech.
   is <old>. NEVER use the workspace .git for this: verified that a forged
   loose object fools `git merge-base --is-ancestor` (git does not verify
   hashes on read; only fsck does), and running git there reads the agent's
-  config (core.fsmonitor = a command on the Mac). Known false alarm: moving a
-  branch onto a commit the server already has is refused. TEST TRAP: the end-to-end test
+  config (core.fsmonitor = a command on the Mac). When the walk leaves the
+  pack without meeting <old> (`walkPack` exits: commits the server already
+  has — agent continues from a main that merged its branch; a branch moved
+  onto an existing commit, empty pack), the broker asks the SERVER: a bare
+  commits-only copy (`clone --filter=tree:0`, refspecs heads+tags; a server
+  without filter support makes git fall back to a full copy by itself,
+  verified) per repo in ~/.vivary/.git-cache/<host>/<path>.git, fetched with
+  the Mac's credentials, one fetch at a time per repo, GIT_NO_LAZY_FETCH, then
+  `merge-base --is-ancestor <old> <exit>`. TEST TRAP: the end-to-end test
   (test/git-proxy.test.mjs, real git + `git http-backend` CGI + local
   upload/receive-pack for ssh) runs broker and upstream in the test process —
   the git client MUST be spawned async, spawnSync deadlocks. Verified in a
