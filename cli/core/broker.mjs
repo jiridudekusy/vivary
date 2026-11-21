@@ -257,6 +257,18 @@ export function cmdBroker(argv) {
     };
     if (req.method === 'GET' && req.url === '/health') return respond(200, { ok: true });
 
+    // Plugins that speak their own protocol on a path (the git proxy's smart
+    // HTTP) get the raw request first and authenticate it themselves.
+    try {
+      for (const p of getPlugins()) {
+        if (p.brokerRaw && p.brokerRaw({ req, res, respond, log: brokerLog, sandboxByToken })) return;
+      }
+    } catch (e) {
+      brokerError(`raw request ${req.method} ${req.url}`, e);
+      if (!res.headersSent) respond(503, { ok: false, error: e.code || 'internal error' });
+      return;
+    }
+
     const dispatch = (params) => {
       const sandbox = sandboxByToken(params.get('token'));
       if (!sandbox) {
@@ -286,6 +298,26 @@ export function cmdBroker(argv) {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 4 * 1024 * 1024) req.destroy(); });
     req.on('end', () => safeDispatch(new URLSearchParams(body)));
+  });
+  // A long-lived two-way stream (the git proxy's ssh transport): an HTTP
+  // Upgrade carrying the sandbox's token in a header.
+  server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => {});
+    try {
+      const sandbox = sandboxByToken(req.headers['x-vivary-token']);
+      if (!sandbox) {
+        brokerLog(`DENIED bad token (upgrade ${req.url}) from ${req.socket.remoteAddress}`);
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 10\r\n\r\nbad token\n');
+        return;
+      }
+      for (const p of getPlugins()) {
+        if (p.brokerUpgrade && p.brokerUpgrade({ req, socket, head, sandbox, log: brokerLog })) return;
+      }
+      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    } catch (e) {
+      brokerError(`upgrade ${req.url}`, e);
+      socket.destroy();
+    }
   });
   server.listen(BROKER_PORT, '0.0.0.0', () => {
     console.log(`vivary broker listening on :${BROKER_PORT} (log: ${BROKER_DIR}/broker.log)`);

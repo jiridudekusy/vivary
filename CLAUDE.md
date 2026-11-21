@@ -73,7 +73,7 @@ English, converse with the user in Czech.
   broker routes, agents/launchers) + `image.dockerfile` fragment + `rootfs/`
   + `entrypoint.d/` hooks. Plugins: egress(5), sudo(16), headed(20),
   ports(25), mounts(26), ssh(30), tailscale(35), docker(40), npmrc(45),
-  uunpm(47), host-open(50), clipboard(60), node-modules(70),
+  uunpm(47), host-open(50), git(52), clipboard(60), node-modules(70),
   agent-claude(80), agent-codex(85), agent-cursor(90).
   mounts: `-v/--volume HOST[:GUEST][:ro]`, bare path = SAME path in the
   sandbox; works on all 3 runtimes (RunSpec.mounts is structural, tart renders
@@ -204,6 +204,31 @@ English, converse with the user in Czech.
   to the user: Keychain items are readable without a prompt by any process
   running as the user (`security`) — protection is at rest, from backups, and
   from sandboxes (no Keychain access there), not from local malware.
+- git plugin (2026-11-21): git through the Mac, no credential in the sandbox.
+  Policy `git: [{repo, push?, transport?, account?}]` in the approved
+  .vivary.json and profiles (validated in core/config via plugins/git/
+  policy.mjs; read by `gitPolicy` WITHOUT die() — the broker must survive a
+  broken profile). The sandbox gets /run/vivary/gitconfig (runSecrets; the
+  image's /etc/gitconfig `include.path`s it, a missing include is ignored):
+  `core.sshCommand = vivary-git-ssh`, `ssh.variant = ssh` (else git calls an
+  unknown command the "simple" variant and refuses -p), url.insteadOf for
+  every https host -> `http://host.docker.internal:7377/git/<host>/`, and a
+  credential helper for that URL that returns the sandbox's broker token.
+  HTTPS: broker `brokerRaw` hook = smart-HTTP reverse proxy, Basic auth =
+  broker token, Mac credential from `git credential fill` (GitHub on this Mac
+  is HTTPS via `gh auth git-credential` — Mac ssh to github.com is DENIED,
+  publickey), cached 5 min in memory. SSH: broker `upgrade` hook /git-ssh,
+  frames broker->shim [type u8][len u32][data] (1 stdout, 2 stderr, 3 exit),
+  shim->broker raw stdin; `ssh -T -o BatchMode=yes -p <port> user@host
+  "<service> '<path>'"` on the Mac. Push check: the broker reads the pkt-line
+  ref-update list (up to the flush) BEFORE forwarding anything; HTTPS denial is
+  a receive-pack report (`ng <ref> vivary: ...`, inside side-band when asked)
+  so git shows "remote rejected"; a fetch/read-only denial is an `ERR` pkt in
+  the ref advertisement ("remote error: ..."). TEST TRAP: the end-to-end test
+  (test/git-proxy.test.mjs, real git + `git http-backend` CGI + local
+  upload/receive-pack for ssh) runs broker and upstream in the test process —
+  the git client MUST be spawned async, spawnSync deadlocks. Verified in a
+  real sandbox against github.com/jiridudekusy/vivary and uuCodebase.
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).

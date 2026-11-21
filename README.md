@@ -422,6 +422,37 @@ into the sandbox or puts text on its clipboard. The way in is the same session:
   on its network with the old 8-character password. `vivary up <name>` says
   so; `vivary up <name> --recreate` moves it over.
 
+## Git through the Mac (`git` in `.vivary.json`)
+
+Agents use git as usual — `git clone https://github.com/...`, `git push` —
+but no git credential ever enters the sandbox: the Mac does the talking.
+
+```json
+"git": [
+  { "repo": "github.com/jiridudekusy/findmy", "push": ["agent/*"] },
+  { "repo": "uucodebase.plus4u.net/<awid>/<name>" },
+  { "repo": "github.com/acme/*", "push": ["feature/**"], "account": "jdk-acme" }
+]
+```
+
+- A repository no entry names cannot even be fetched. `push` lists the
+  branches the agent may update (`*` stays within one `/` segment, `**`
+  crosses it; `refs/tags/...` for tags); without it the repository is
+  read-only. The push is checked before anything leaves the Mac; the agent
+  sees `! [remote rejected] main (vivary: ... not allowed)`.
+- **HTTPS hosts** (github.com, gitlab.com, bitbucket.org): the sandbox's git
+  is rewritten to the broker (`https://`, `git@host:` and `ssh://` spellings),
+  which adds the Mac's own credential from `git credential` (gh, Keychain).
+  `account` picks one of several logins.
+- **SSH hosts** (uuCodebase and anything else, or `"transport": "ssh"`): git's
+  ssh command in the sandbox is a shim that hands the request to the broker;
+  the broker runs only `git-upload-pack`/`git-receive-pack` with `ssh` on the
+  Mac, with your keys and `~/.ssh/config`.
+- Rules come from the approved `.vivary.json` and from profiles; a change
+  applies at the next start. Every fetch and push, allowed or not, is in the
+  broker log. Not covered: force-push to an allowed branch (protect branches
+  on the server), `gh`/API calls, signed pushes.
+
 ## Secrets
 
 vivary keeps none of its own secrets in plaintext on the Mac or in a
