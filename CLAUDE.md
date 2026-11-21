@@ -224,7 +224,21 @@ English, converse with the user in Czech.
   ref-update list (up to the flush) BEFORE forwarding anything; HTTPS denial is
   a receive-pack report (`ng <ref> vivary: ...`, inside side-band when asked)
   so git shows "remote rejected"; a fetch/read-only denial is an `ERR` pkt in
-  the ref advertisement ("remote error: ..."). TEST TRAP: the end-to-end test
+  the ref advertisement ("remote error: ..."). FORCE/DELETE (2026-11-21):
+  per-entry `force` and `delete` ref lists (subsets of `push`); an update of
+  a ref not in `force` must PROVE a fast-forward from the push alone: the
+  broker adds `no-thin` to receive-pack's advertisement (a client MUST NOT
+  send a thin pack then — verified: without it git sent "1 unresolved
+  delta"), spools the body to a 0700 temp dir (ssh has no body end:
+  `PackEnd` spots the pack's trailing hash), `git index-pack --stdin` into a
+  throwaway bare repo (it hashes every object, so a commit found under <new>
+  really has its parents) and walks parents in JS to <old>. <old> is safe to
+  take from the client: the server applies the update only if the ref still
+  is <old>. NEVER use the workspace .git for this: verified that a forged
+  loose object fools `git merge-base --is-ancestor` (git does not verify
+  hashes on read; only fsck does), and running git there reads the agent's
+  config (core.fsmonitor = a command on the Mac). Known false alarm: moving a
+  branch onto a commit the server already has is refused. TEST TRAP: the end-to-end test
   (test/git-proxy.test.mjs, real git + `git http-backend` CGI + local
   upload/receive-pack for ssh) runs broker and upstream in the test process —
   the git client MUST be spawned async, spawnSync deadlocks. Verified in a

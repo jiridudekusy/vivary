@@ -28,8 +28,10 @@ import { parseConfig, profilesDir } from '../../core/config.mjs';
 import { approvedProject } from '../../core/effective.mjs';
 import { pluginFlagDefs, pluginsLoaded } from '../../core/plugins.mjs';
 import {
-  findEntry, mergePolicy, parsePushCommands, refAllowed, rejectReport, repoKey, transportFor, pkt, FLUSH,
+  PackEnd, capabilityInjector, denialText, findEntry, judgePush, mergePolicy, objectFormatOf, parsePushCommands,
+  rejectReport, repoKey, transportFor, pkt,
 } from './policy.mjs';
+import { MAX_PUSH_BODY, Spool, notFastForward } from './pushcheck.mjs';
 
 const BROKER_IN_SANDBOX = 'http://host.docker.internal:7377';
 const MAX_PUSH_HEAD = 1 << 20; // the command list of a push; refs, not packs
@@ -139,7 +141,10 @@ export function makeHttpHandler({ policyFor = gitPolicy, credential = macCredent
     const cred = credential(host, entry.account);
     if (!cred) { deny(502, `vivary: the Mac has no git credential for ${host}`); return true; }
 
-    const forward = (bodyHead) => {
+    // body: { head } = these bytes then the rest of req; { spool } = the
+    // spooled body (disposed when sent). inject: add a capability to the
+    // ref advertisement coming back.
+    const forward = ({ head: bodyHead, spool, inject } = {}) => {
       const target = new URL(`${upstreamBase || `https://${host}`}/${rawPath}/${what}${url.search}`);
       const headers = { authorization: `Basic ${Buffer.from(`${cred.username}:${cred.password}`).toString('base64')}` };
       for (const h of ['content-type', 'accept', 'content-encoding', 'git-protocol', 'user-agent']) {
@@ -157,10 +162,23 @@ export function makeHttpHandler({ policyFor = gitPolicy, credential = macCredent
           if (ures.headers[h]) out[h] = ures.headers[h];
         }
         res.writeHead(ures.statusCode, out);
-        ures.pipe(res);
+        if (!inject || ures.statusCode !== 200) return ures.pipe(res);
+        const filter = capabilityInjector(inject);
+        ures.on('data', (d) => { const b = filter.feed(d); if (b.length) res.write(b); });
+        ures.on('end', () => res.end(filter.end()));
+        return undefined;
       });
-      up.on('error', (e) => { if (!res.headersSent) deny(502, `vivary: ${host}: ${e.message}`); else res.destroy(); });
+      up.on('error', (e) => {
+        spool?.dispose();
+        if (!res.headersSent) deny(502, `vivary: ${host}: ${e.message}`); else res.destroy();
+      });
       if (req.method !== 'POST') return up.end();
+      if (spool) {
+        const rs = fs.createReadStream(spool.file);
+        rs.on('close', () => spool.dispose());
+        rs.pipe(up);
+        return undefined;
+      }
       if (bodyHead) up.write(bodyHead);
       req.pipe(up);
       req.resume();
@@ -169,7 +187,8 @@ export function makeHttpHandler({ policyFor = gitPolicy, credential = macCredent
 
     if (!(push && what === 'git-receive-pack')) {
       if (what !== 'info/refs') log(`GIT ${sandbox.name} ${push ? 'push' : 'fetch'} ${key}`);
-      forward(null);
+      // no-thin: the pack must be checkable on its own (policy.mjs).
+      forward({ inject: push ? 'no-thin' : null });
       return true;
     }
     // A push: read the ref-update commands before anything leaves the Mac.
@@ -185,15 +204,38 @@ export function makeHttpHandler({ policyFor = gitPolicy, credential = macCredent
         log(`DENIED git ${sandbox.name} push ${key}: ${parsed.error || 'command list too long'}`);
         return deny(400, `vivary: ${parsed.error || 'command list too long'}`);
       }
-      const bad = parsed.commands.filter((c) => !refAllowed(entry, c.ref));
-      if (bad.length) {
-        log(`DENIED git ${sandbox.name} push ${key} ${bad.map((c) => c.ref).join(',')}`);
+      const refs = parsed.commands.map((c) => c.ref).join(',');
+      const reject = (denied) => {
+        log(`DENIED git ${sandbox.name} push ${key} ${denied.map((d) => `${d.ref}(${d.why})`).join(',')}`);
         res.writeHead(200, { 'content-type': 'application/x-git-receive-pack-result', 'cache-control': 'no-cache' });
         const sideband = parsed.caps.some((c) => c.startsWith('side-band'));
-        return res.end(rejectReport(parsed.commands, `vivary: push to ${bad.map((c) => c.ref).join(', ')} is not allowed for this sandbox`, { sideband }));
+        res.end(rejectReport(parsed.commands, denialText(denied), { sideband }));
+      };
+      const verdict = judgePush(entry, parsed.commands);
+      if (verdict.denied.length) return reject(verdict.denied);
+      if (!verdict.ancestry.length) {
+        log(`GIT ${sandbox.name} push ${key} ${refs}`);
+        return forward({ head });
       }
-      log(`GIT ${sandbox.name} push ${key} ${parsed.commands.map((c) => c.ref).join(',')}`);
-      return forward(head);
+      // Updates without force: the whole body first, then the check.
+      const spool = new Spool();
+      spool.write(head);
+      const fail = (code, msg) => { spool.dispose(); log(`DENIED git ${sandbox.name} push ${key}: ${msg}`); deny(code, `vivary: ${msg}`); };
+      req.on('data', (d) => {
+        if (spool.size + d.length > MAX_PUSH_BODY) { req.destroy(); return fail(413, 'push too large to check'); }
+        return spool.write(d);
+      });
+      req.on('error', () => spool.dispose());
+      req.on('end', async () => {
+        spool.close();
+        const r = await notFastForward(spool.file, parsed.end, verdict.ancestry, { objectFormat: objectFormatOf(parsed.caps) });
+        if (r.error) { spool.dispose(); return reject(verdict.ancestry.map((c) => ({ ref: c.ref, why: 'check', note: r.error }))); }
+        if (r.bad.length) { spool.dispose(); return reject(r.bad.map((c) => ({ ref: c.ref, why: 'force' }))); }
+        log(`GIT ${sandbox.name} push ${key} ${refs} (fast-forward checked)`);
+        return forward({ spool });
+      });
+      req.resume();
+      return undefined;
     };
     req.on('data', onData);
     return true;
@@ -257,7 +299,12 @@ export function makeSshHandler({ policyFor = gitPolicy, sshSpawn = (args) => spa
       if (msg) socket.write(frame(2, `${msg}\n`));
       socket.end(frame(3, Buffer.from([code & 0xff])));
     };
-    child.stdout.on('data', (d) => socket.write(frame(1, d)));
+    const filter = push ? capabilityInjector('no-thin') : null; // see policy.mjs
+    child.stdout.on('data', (d) => {
+      const b = filter ? filter.feed(d) : d;
+      if (b.length) socket.write(frame(1, b));
+    });
+    child.stdout.on('end', () => { const b = filter?.end(); if (b?.length) socket.write(frame(1, b)); });
     child.stderr.on('data', (d) => socket.write(frame(2, d)));
     child.on('error', (e) => finish(255, `vivary: ssh: ${e.message}`));
     child.on('close', (code) => finish(code ?? 255));
@@ -281,16 +328,57 @@ export function makeSshHandler({ policyFor = gitPolicy, sshSpawn = (args) => spa
         finish(1, `vivary: ${parsed.error || 'command list too long'}`);
         return true;
       }
-      const bad = parsed.commands.filter((c) => !refAllowed(entry, c.ref));
-      if (bad.length) {
-        log(`DENIED git ${sandbox.name} push ${key} ${bad.map((c) => c.ref).join(',')} (ssh)`);
+      const refs = parsed.commands.map((c) => c.ref).join(',');
+      const reject = (denied) => {
+        log(`DENIED git ${sandbox.name} push ${key} ${denied.map((d) => `${d.ref}(${d.why})`).join(',')} (ssh)`);
         child.kill('SIGTERM');
-        finish(1, `vivary: push to ${bad.map((c) => c.ref).join(', ')} is not allowed for this sandbox`);
+        finish(1, denialText(denied));
+      };
+      const verdict = judgePush(entry, parsed.commands);
+      if (verdict.denied.length) { reject(verdict.denied); return true; }
+      if (!verdict.ancestry.length) {
+        log(`GIT ${sandbox.name} push ${key} ${refs} (ssh)`);
+        child.stdin.write(buf);
+        socket.pipe(child.stdin);
         return true;
       }
-      log(`GIT ${sandbox.name} push ${key} ${parsed.commands.map((c) => c.ref).join(',')} (ssh)`);
-      child.stdin.write(buf);
-      socket.pipe(child.stdin);
+      // Updates without force: the whole pack first (ssh has no body end —
+      // PackEnd spots the pack's trailing hash), then the check.
+      socket.pause();
+      const spool = new Spool();
+      socket.on('close', () => spool.dispose());
+      const packEnd = new PackEnd(objectFormatOf(parsed.caps));
+      const decide = async () => {
+        socket.off('data', onPack);
+        socket.pause();
+        spool.close();
+        const r = await notFastForward(spool.file, parsed.end, verdict.ancestry, { objectFormat: objectFormatOf(parsed.caps) });
+        if (r.error || r.bad.length) {
+          spool.dispose();
+          return reject(r.error ? verdict.ancestry.map((c) => ({ ref: c.ref, why: 'check', note: r.error }))
+            : r.bad.map((c) => ({ ref: c.ref, why: 'force' })));
+        }
+        log(`GIT ${sandbox.name} push ${key} ${refs} (ssh, fast-forward checked)`);
+        const rs = fs.createReadStream(spool.file);
+        rs.pipe(child.stdin, { end: false });
+        rs.on('end', () => { spool.dispose(); socket.pipe(child.stdin); });
+        return undefined;
+      };
+      const onPack = (d) => {
+        spool.write(d);
+        if (spool.size > MAX_PUSH_BODY) {
+          socket.off('data', onPack);
+          spool.dispose();
+          log(`DENIED git ${sandbox.name} push ${key}: too large to check (ssh)`);
+          child.kill('SIGTERM');
+          return finish(1, 'vivary: push too large to check');
+        }
+        if (packEnd.feed(d)) decide();
+        return undefined;
+      };
+      spool.write(buf);
+      if (packEnd.feed(buf.subarray(parsed.end))) decide();
+      else { socket.on('data', onPack); socket.resume(); }
       return true;
     };
     const onData = (d) => { buf = Buffer.concat([buf, d]); check(); };

@@ -12,10 +12,12 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const { makeHttpHandler, makeSshHandler, sandboxGitconfig } = await import('../plugins/git/plugin.mjs');
 const {
-  findEntry, parsePushCommands, refAllowed, repoKey, validateGitConfig, mergePolicy, pkt, FLUSH,
+  PackEnd, capabilityInjector, findEntry, judgePush, parseBatchCommits, parsePushCommands, reaches, refAllowed, repoKey,
+  validateGitConfig, mergePolicy, pkt, FLUSH,
 } = await import('../plugins/git/policy.mjs');
 
 const SHIM = fileURLToPath(new URL('../plugins/git/rootfs/vivary-git-ssh.mjs', import.meta.url));
@@ -40,9 +42,9 @@ git(['-C', seed, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-
 for (const repo of ['owner/repo.git', 'owner/other.git', 'awid/name.git']) git(['-C', seed, 'push', '-q', path.join(ROOT, repo), 'main']);
 
 const POLICY = validateGitConfig([
-  { repo: 'github.com/owner/repo', push: ['agent/*'] },
+  { repo: 'github.com/owner/repo', push: ['agent/**'], force: ['agent/scratch/*'], delete: ['agent/scratch/*'] },
   { repo: 'github.com/owner/readonly' },
-  { repo: 'uucodebase.test/awid/name', push: ['agent/*'] },
+  { repo: 'uucodebase.test/awid/name', push: ['agent/**'], force: ['agent/scratch/*'], delete: ['agent/scratch/*'] },
 ], 'test');
 
 // --- an upstream smart-HTTP server: git http-backend as CGI ---------------------
@@ -136,6 +138,7 @@ const commit = async (dir, msg) => {
   await sbx(['add', '.'], dir);
   await sbx(['-c', 'user.name=agent', '-c', 'user.email=a@a', 'commit', '-q', '-m', msg], dir);
 };
+const upstreamRev = (repo, ref) => git(['--git-dir', path.join(ROOT, repo), 'rev-parse', '--verify', '-q', ref]).stdout.trim();
 const upstreamHas = (repo, ref) => git(['--git-dir', path.join(ROOT, repo), 'rev-parse', '--verify', '-q', ref]).status === 0;
 
 test('HTTPS: clone, push to an allowed branch, refused push to main — the Mac credential never reaches git', async () => {
@@ -191,6 +194,100 @@ test('SSH: a wrong token, or anything but git fetch/push, is refused', async () 
   const shell = await runAsync('node', [SHIM, '-p', '9422', 'git@uucodebase.test', 'cat /etc/passwd'], { env: SBX_ENV });
   assert.notEqual(shell.status, 0);
   assert.match(shell.stderr, /only git fetch\/push/);
+});
+
+// Fast-forward, force and delete rules, the same over both transports. The
+// big file makes a delta against the server's copy tempting: a thin pack
+// would lean on it and fail the check, so a pass also proves no-thin works.
+for (const [label, url, repo] of [
+  ['HTTPS', 'https://github.com/owner/repo.git', 'owner/repo.git'],
+  ['SSH', 'ssh://git@uucodebase.test:9422/awid/name.git', 'awid/name.git'],
+]) {
+  test(`${label}: fast-forwards pass, rewrites and deletes only where force/delete allow`, async () => {
+    const dir = path.join(TMP, `ff-${label}`);
+    assert.equal((await sbx(['clone', '-q', url, dir])).status, 0);
+    const big = Array.from({ length: 3000 }, (_, i) => `line ${i} of a file that deltas well`).join('\n');
+    fs.writeFileSync(path.join(dir, 'big.txt'), `${big}\n`);
+    await commit(dir, 'base');
+    for (const b of ['agent/ff', 'agent/scratch/x']) {
+      assert.equal((await sbx(['push', 'origin', `HEAD:refs/heads/${b}`], dir)).status, 0);
+    }
+    fs.writeFileSync(path.join(dir, 'big.txt'), `${big}\nchanged\n`);
+    await commit(dir, 'next');
+    const ff = await sbx(['push', 'origin', 'HEAD:refs/heads/agent/ff'], dir);
+    assert.equal(ff.status, 0, ff.out);
+    const head = (await sbx(['rev-parse', 'HEAD'], dir)).out.trim();
+    assert.equal(upstreamRev(repo, 'refs/heads/agent/ff'), head);
+    assert.ok(logs.some((l) => l.includes('fast-forward checked')));
+
+    await sbx(['-c', 'user.name=agent', '-c', 'user.email=a@a', 'commit', '-q', '--amend', '-m', 'rewritten'], dir);
+    const force = await sbx(['push', '--force', 'origin', 'HEAD:refs/heads/agent/ff'], dir);
+    assert.notEqual(force.status, 0);
+    assert.match(force.out, /agent\/ff: not a fast-forward, and force push is not allowed/);
+    assert.equal(upstreamRev(repo, 'refs/heads/agent/ff'), head, 'the rewrite never reached the server');
+    const reset = await sbx(['push', '--force', 'origin', 'HEAD~2:refs/heads/agent/ff'], dir);
+    assert.notEqual(reset.status, 0, 'moving a branch back is a rewrite too');
+    const allowed = await sbx(['push', '--force', 'origin', 'HEAD:refs/heads/agent/scratch/x'], dir);
+    assert.equal(allowed.status, 0, allowed.out);
+
+    const del = await sbx(['push', 'origin', ':refs/heads/agent/ff'], dir);
+    assert.notEqual(del.status, 0);
+    assert.match(del.out, /deleting refs\/heads\/agent\/ff is not allowed/);
+    assert.ok(upstreamHas(repo, 'refs/heads/agent/ff'));
+    assert.equal((await sbx(['push', 'origin', ':refs/heads/agent/scratch/x'], dir)).status, 0);
+    assert.ok(!upstreamHas(repo, 'refs/heads/agent/scratch/x'));
+  });
+}
+
+test('push rules and the wire helpers', () => {
+  const z = '0'.repeat(40);
+  const a = 'a'.repeat(40);
+  const b = 'b'.repeat(40);
+  const entry = { push: ['agent/**'], force: ['agent/tmp/*'], delete: ['agent/tmp/*'] };
+  const v = judgePush(entry, [
+    { old: z, new: a, ref: 'refs/heads/agent/new' }, // create: push is enough
+    { old: a, new: b, ref: 'refs/heads/agent/x' }, // update: must prove ff
+    { old: a, new: b, ref: 'refs/heads/agent/tmp/y' }, // force allowed
+    { old: a, new: z, ref: 'refs/heads/agent/x' }, // delete: not allowed
+    { old: a, new: z, ref: 'refs/heads/agent/tmp/y' }, // delete allowed
+    { old: a, new: b, ref: 'refs/heads/main' }, // not pushable at all
+  ]);
+  assert.deepEqual(v.ancestry.map((c) => c.ref), ['refs/heads/agent/x']);
+  assert.deepEqual(v.denied, [{ ref: 'refs/heads/agent/x', why: 'delete' }, { ref: 'refs/heads/main', why: 'push' }]);
+  assert.deepEqual(mergePolicy([{ repo: 'h/a', push: ['x'], force: ['x'] }], [{ repo: 'h/a', delete: ['y'] }])[0],
+    { repo: 'h/a', push: ['x'], force: ['x'], delete: ['y'] });
+  assert.throws(() => validateGitConfig([{ repo: 'h/a', force: 'x' }], 'f'), /'force' must be an array/);
+
+  // the walk: merges, and a parent outside the pack ends that path
+  const parents = new Map([['c3', ['c2', 'm1']], ['c2', ['c1']], ['m1', ['outside']]]);
+  assert.ok(reaches(parents, 'c3', 'c1'));
+  assert.ok(reaches(parents, 'c3', 'outside'), 'the old tip itself may be outside the pack');
+  assert.ok(!reaches(parents, 'c3', 'elsewhere'));
+  assert.ok(!reaches(parents, 'unknown', 'c1'), 'a new tip not in the pack proves nothing');
+  const batch = Buffer.from('c1 commit 34\ntree t\nparent p1\nparent p2\n\nmsg\nx missing\n');
+  assert.deepEqual([...parseBatchCommits(batch)], [['c1', ['p1', 'p2']]]);
+
+  // no-thin lands on the first ref line, split anywhere, and nothing else moves
+  const adv = Buffer.concat([pkt('# service=git-receive-pack\n'), FLUSH,
+    pkt(`${a} refs/heads/main\0report-status side-band-64k\n`), pkt(`${b} refs/heads/x\n`), FLUSH]);
+  for (const cut of [3, 40, 70]) {
+    const inj = capabilityInjector('no-thin');
+    const out = Buffer.concat([inj.feed(adv.subarray(0, cut)), inj.feed(adv.subarray(cut)), inj.end()]).toString();
+    assert.ok(out.includes('report-status side-band-64k no-thin\n'), out);
+    assert.ok(out.endsWith(`${pkt(`${b} refs/heads/x\n`)}0000`));
+  }
+
+  // the pack end: its trailing hash, however the stream is chunked
+  const body = Buffer.concat([Buffer.from('PACK\0\0\0\x02\0\0\0\0'), Buffer.from('x'.repeat(50))]);
+  const pack = Buffer.concat([body, createHash('sha1').update(body).digest()]);
+  const pe = new PackEnd();
+  assert.ok(!pe.feed(pack.subarray(0, 30)));
+  assert.ok(!pe.feed(pack.subarray(30, pack.length - 5)));
+  assert.ok(pe.feed(pack.subarray(pack.length - 5)));
+
+  // push-options: the pack starts after their list
+  const withOpts = Buffer.concat([pkt(`${z} ${a} refs/heads/x\0report-status push-options`), FLUSH, pkt('ci.skip'), FLUSH, Buffer.from('PACK')]);
+  assert.equal(parsePushCommands(withOpts).end, withOpts.length - 4);
 });
 
 test('policy: repo keys, globs, branch patterns, merging, validation', () => {

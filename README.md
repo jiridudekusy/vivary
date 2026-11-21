@@ -429,7 +429,8 @@ but no git credential ever enters the sandbox: the Mac does the talking.
 
 ```json
 "git": [
-  { "repo": "github.com/jiridudekusy/findmy", "push": ["agent/*"] },
+  { "repo": "github.com/jiridudekusy/findmy", "push": ["agent/**"],
+    "force": ["agent/scratch/*"], "delete": ["agent/scratch/*"] },
   { "repo": "uucodebase.plus4u.net/<awid>/<name>" },
   { "repo": "github.com/acme/*", "push": ["feature/**"], "account": "jdk-acme" }
 ]
@@ -438,8 +439,19 @@ but no git credential ever enters the sandbox: the Mac does the talking.
 - A repository no entry names cannot even be fetched. `push` lists the
   branches the agent may update (`*` stays within one `/` segment, `**`
   crosses it; `refs/tags/...` for tags); without it the repository is
-  read-only. The push is checked before anything leaves the Mac; the agent
-  sees `! [remote rejected] main (vivary: ... not allowed)`.
+  read-only. A branch in `push` may be created and moved forward only;
+  `force` lists the ones that may also be rewritten (amend, rebase, reset —
+  moving a tag counts), `delete` the ones that may be deleted (both only
+  among those in `push`). Everything is checked before anything leaves the
+  Mac; the agent sees `! [remote rejected] main (vivary: ... not allowed)`.
+- How a fast-forward is proven without a copy of the repository: the broker
+  asks git for a self-contained pack (`no-thin`), indexes it in a throwaway
+  repository on the Mac (git computes every object's name from its content)
+  and walks the new commits' parents to the old tip. The sandbox's own `.git`
+  is never trusted for this — the agent can rewrite it. One honest false
+  alarm: moving a branch onto a commit the server already has
+  (`git push origin main:agent/x` when agent/x is behind) cannot be proven
+  from the push and is refused as a rewrite.
 - **HTTPS hosts** (github.com, gitlab.com, bitbucket.org): the sandbox's git
   is rewritten to the broker (`https://`, `git@host:` and `ssh://` spellings),
   which adds the Mac's own credential from `git credential` (gh, Keychain).
@@ -450,8 +462,7 @@ but no git credential ever enters the sandbox: the Mac does the talking.
   Mac, with your keys and `~/.ssh/config`.
 - Rules come from the approved `.vivary.json` and from profiles; a change
   applies at the next start. Every fetch and push, allowed or not, is in the
-  broker log. Not covered: force-push to an allowed branch (protect branches
-  on the server), `gh`/API calls, signed pushes.
+  broker log. Not covered: `gh`/API calls, signed pushes.
 
 ## Secrets
 
