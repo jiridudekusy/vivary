@@ -54,10 +54,13 @@ export default {
   needsCaps: (cfg) => !!cfg.egress,
   commands: { egress: cmdEgress },
 
-  async runArgs({ cfg, log }) {
+  async runArgs(ctx) {
+    const { cfg, log } = ctx;
     if (!cfg.egress) return [];
     const { ip, adminPassword } = await ensureAshp(cfg.runtime);
-    const token = await ensureAgent(ip, adminPassword, cfg.name);
+    // Handed in after the start (runSecrets below), not as -e: that baked it
+    // into the container's config on the Mac.
+    ctx.egressToken = await ensureAgent(ip, adminPassword, cfg.name);
     // Approved .vivary.json egress policy (presets + allow) -> ASHP rules.
     // No policy (no file / no egress section) -> sync to empty, which drops
     // stale vivary-managed rules and leaves deny-all + UI approval.
@@ -87,7 +90,6 @@ export default {
       '-e', 'SANDBOX_EGRESS=1',
       '-e', `SBX_EGRESS_ASHP_IP=${ip}`,
       '-e', `SBX_EGRESS_AGENT=${cfg.name}`,
-      '-e', `SBX_EGRESS_TOKEN=${token}`,
       '-e', `SBX_EGRESS_MGMT_HOST=${MGMT_HOSTNAME}`,
       '-v', `${egressDir}:/vivary-egress`,
       // The MITM CA for the main process and `exec` sessions (ssh sessions get
@@ -99,6 +101,11 @@ export default {
       '-e', 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt',
       '-e', 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt',
     ];
+  },
+
+  // The sandbox's ASHP agent token, into its RAM; the boot hook waits for it.
+  runSecrets(ctx) {
+    return ctx.cfg.egress && ctx.egressToken ? { 'egress-token': ctx.egressToken } : null;
   },
 
   // tart: no internal egress net and no in-guest firewall. Instead: a Softnet

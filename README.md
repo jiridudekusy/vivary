@@ -422,6 +422,31 @@ into the sandbox or puts text on its clipboard. The way in is the same session:
   on its network with the old 8-character password. `vivary up <name>` says
   so; `vivary up <name> --recreate` moves it over.
 
+## Secrets
+
+vivary keeps none of its own secrets in plaintext on the Mac or in a
+container's configuration:
+
+- **Per run, in RAM:** every new container gets a tmpfs at `/run/vivary`;
+  after each start vivary writes into it, through `exec` with the value on
+  stdin, what that run needs: the broker token (fresh per start — the Mac
+  keeps only its sha256), the npm credentials from your `~/.npmrc` (`--npmrc`;
+  npm reads them as its global config) and the egress agent token. Before,
+  they were `-e` variables baked into the container's config (Apple's
+  `config.json`, `docker inspect`) and copies under `~/.vivary`.
+- **Long-lived, in the login Keychain** (service `vivary`): ASHP's database,
+  log and CA keys, its admin password (`vivary: ashp-admin` in Keychain
+  Access, for the policy UI) and the agent tokens. An existing
+  `~/.vivary/.ashp/secrets.json` is moved over once and deleted.
+- What it protects against: backups and disk images, and every sandbox (none
+  can reach the Mac's Keychain). Not against a program running as you on the
+  unlocked Mac — it can read Keychain items through `security` like vivary
+  does; macOS protects items per app only for signed apps.
+- A container created before this keeps the old way until
+  `vivary up <name> --recreate`; every start says so. tart guests still use
+  the old broker token. Your own `~/.npmrc` and the agent logins
+  (`dot-claude`, `dot-codex`) are untouched.
+
 ## Security boundary
 
 The container sees only: the workspace, its own per-sandbox state, and the

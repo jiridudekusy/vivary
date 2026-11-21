@@ -332,7 +332,16 @@ Decisions:
 - **UI stays build-free**: plain ES modules served by the web server, strict CSP
   (no inline script). React is not needed without the approval inbox.
 
-Status (2026-11-11): (1), (2) and (3) built and verified end to end; (4) open.
+Status (2026-11-21): (1), (2) and (3) built and verified end to end; (4) partly: per-run
+secrets into a `/run/vivary` tmpfs via exec (broker token fresh per start, only its hash on
+the Mac; npm credentials; egress agent token), ASHP keys and agent tokens in the login
+Keychain (one item per value — `security` cuts a stdin value off at 128 bytes without an
+error, so every write is read back). The user chose the Keychain over a passkey-unlocked
+vault after the trade-off: the vault adds protection only while locked (after a reboot,
+against someone with the Mac password) at the price of nothing running — SSH included —
+until a passkey login. Paseo is out (to be replaced by SSH into Orca). Open: one Mac SSH
+key with a Keychain passphrase instead of 44 unprotected per-sandbox keys, after testing
+Claude Desktop/Orca against it.
 Step 3 as built: changes go through new CLI commands run as child processes —
 `vivary set` (the sandbox's own layer; refuses what `.vivary.json` decides and
 the host-access list flags; says next-start / restart / recreate) and

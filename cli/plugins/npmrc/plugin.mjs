@@ -4,13 +4,19 @@
 //   * localhost registries are rewritten to host.docker.internal (values AND
 //     the //host/:_authToken auth keys, which npm matches by URL)
 //   * cafile paths are copied into the sandbox state and rewritten
-//   * ${ENV_VAR} references stay UNEXPANDED in the persisted file; the
-//     referenced variables are injected as container env at start and the
-//     entrypoint hook expands them into the container-local ~/.npmrc — so
-//     env-provided tokens never land in the sandbox state on disk
+//   * ${ENV_VAR} references are expanded on the HOST from its environment
 //
-// The import is re-derived from the host ~/.npmrc on every start (token
-// rotation just works; in-container edits of ~/.npmrc don't survive).
+// The result holds the credentials, so it is never stored: after every start
+// it is handed into the container's RAM (/run/vivary/npmrc, core/runsecrets)
+// and npm reads it as its GLOBAL config (/usr/etc/npmrc is a symlink there,
+// baked into the image), so ~/.npmrc keeps only local settings (uunpm's
+// ignore-scripts). It used to be a copy in ~/.vivary/<name>/dot-config with
+// every literal token in plaintext, plus the ${VAR} values as `-e` variables
+// baked into the container's config. Re-derived on every start, so token
+// rotation just works.
+//
+// LEGACY: a kept container from before (no /run/vivary tmpfs) still gets the
+// old file and keeps its baked env until `vivary up --recreate`.
 //
 // Flag values (sticky):
 //   --npmrc              = all: the whole file
@@ -127,12 +133,23 @@ export default {
     },
   },
 
-  runArgs({ cfg, dir, log }) {
-    if (!cfg.npmrc) return [];
+  // Only the switch: nothing secret goes into the container's config.
+  runArgs({ cfg }) {
+    return cfg.npmrc ? ['-e', 'SANDBOX_NPMRC=1'] : [];
+  },
+
+  // The credentials, handed into RAM after every start (core/runsecrets).
+  async runSecrets(ctx, { tmpfs }) {
+    const { cfg, dir, log } = ctx;
+    const legacyFile = path.join(dir, 'dot-config', 'npmrc-import');
+    if (!cfg.npmrc) {
+      fs.rmSync(legacyFile, { force: true });
+      return null;
+    }
     const hostNpmrc = path.join(HOME, '.npmrc');
     if (!fs.existsSync(hostNpmrc)) {
       console.error('WARNING: --npmrc enabled but host ~/.npmrc does not exist');
-      return [];
+      return null;
     }
     const configDir = path.join(dir, 'dot-config');
     fs.mkdirSync(configDir, { recursive: true });
@@ -140,14 +157,22 @@ export default {
       fs.readFileSync(hostNpmrc, 'utf8'), cfg.npmrc,
       { caDir: configDir, caContainerPath: '/home/agent/.config' },
     );
-    fs.writeFileSync(path.join(configDir, 'npmrc-import'), content, { mode: 0o600 });
-
-    const args = ['-e', 'SANDBOX_NPMRC=1'];
-    for (const name of envRefs) {
-      if (process.env[name] !== undefined) args.push('-e', `${name}=${process.env[name]}`);
-      else console.error(`WARNING: ~/.npmrc references \${${name}} but it is not set on the host`);
+    for (const n of envRefs.filter((x) => process.env[x] === undefined)) {
+      console.error(`WARNING: ~/.npmrc references \${${n}} but it is not set on the host`);
     }
-    log(`==> npmrc import: mode '${cfg.npmrc}'${envRefs.length ? `, env refs: ${envRefs.join(', ')}` : ''}`);
-    return args;
+    log(`==> npmrc: mode '${cfg.npmrc}'${envRefs.length ? `, env refs: ${envRefs.join(', ')}` : ''}`);
+    if (!tmpfs) {
+      // A container from before: its boot hook reads this file (and its own
+      // baked env for ${VAR}). Gone with the --recreate.
+      fs.writeFileSync(legacyFile, content, { mode: 0o600 });
+      return { npmrc: 'legacy' };
+    }
+    fs.rmSync(legacyFile, { force: true });
+    return { npmrc: expandEnvRefs(content) };
   },
 };
+
+// ${VAR} -> its value on the host; unknown references stay, so npm names them.
+export function expandEnvRefs(text, env = process.env) {
+  return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, n) => (env[n] !== undefined ? env[n] : m));
+}

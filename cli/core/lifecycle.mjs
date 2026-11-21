@@ -21,7 +21,8 @@ import {
 } from './config.mjs';
 import { creationSeeds } from './layers.mjs';
 import { loadProfiles, resolveFor } from './effective.mjs';
-import { brokerEnvArgs, brokerEnvVars } from './broker.mjs';
+import { brokerEnvVars, brokerNeeded, deliverBrokerToken } from './broker.mjs';
+import { hasRunTmpfs, putRunSecret } from './runsecrets.mjs';
 
 const CORE_FLAGS = {
   name: 'string', workspace: 'string', agent: 'string', runtime: 'string',
@@ -478,11 +479,40 @@ async function ensureUpContainer(ctx, rt, { recreate = false } = {}) {
     const r = rt.run(spec, { detached: true });
     if (r.status !== 0) die(`${cfg.runtime} run failed: ${r.stderr || r.stdout}`);
   }
+  if (!vm && !cfg.ephemeral) await handInRunSecrets(ctx);
   for (const p of getPlugins()) {
     if (!vm && p.postUp) await p.postUp(ctx);
     if (vm && p.vmPostUp) await p.vmPostUp(ctx);
   }
   return { started };
+}
+
+// The secrets this run needs, into the container's RAM (core/runsecrets.mjs):
+// a fresh broker token, and whatever plugins hand in (`runSecrets(ctx,
+// { tmpfs })` -> { name: content }). Right after the start, before postUp —
+// boot hooks that need one wait for its file. A container from before the
+// tmpfs keeps the old way (plugins see tmpfs: false) and is told how to move.
+async function handInRunSecrets(ctx) {
+  const { cfg, cname } = ctx;
+  const plugins = getPlugins().filter((p) => p.runSecrets);
+  const broker = brokerNeeded(cfg);
+  if (!broker && !plugins.length) return;
+  const tmpfs = hasRunTmpfs(cfg.runtime, cname);
+  if (broker) deliverBrokerToken(cfg, cfg.runtime, cname, { probed: tmpfs });
+  let legacyUse = broker && !tmpfs;
+  for (const p of plugins) {
+    const secrets = await p.runSecrets(ctx, { tmpfs }) || {};
+    if (!tmpfs && Object.keys(secrets).length) legacyUse = true;
+    if (!tmpfs) continue;
+    for (const [name, content] of Object.entries(secrets)) {
+      putRunSecret(cfg.runtime, cname, name, content, { probed: true });
+    }
+  }
+  if (legacyUse) {
+    console.error(`==> Note: '${cfg.name}' was created before secrets moved to RAM: its container's config\n`
+      + '    (or a file on the Mac) still holds them. Move it over with:\n'
+      + `      vivary up ${cfg.name} --recreate   (what was installed inside the container is lost)`);
+  }
 }
 
 export async function cmdUp(argv) {

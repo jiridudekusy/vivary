@@ -3,14 +3,16 @@
 // upstream egress, `vivary-egress` (internal) facing the sandboxes — so it
 // never restarts as sandboxes come and go and never nears Apple's 4-NIC cap.
 //
-// State lives in ~/.vivary/.ashp/: secrets.json (0600), conf/ashp.json,
+// State lives in ~/.vivary/.ashp/ (secrets in the Keychain, see ensureSecrets): conf/ashp.json,
 // data/ (SQLCipher db + CA), bin/pre-entrypoint.sh (sysctl wrapper, see
-// ashp/pre-entrypoint.sh), agents/<name> (per-sandbox tokens, 0600).
+// ashp/pre-entrypoint.sh). Agent tokens: Keychain `ashp-agent:<name>`.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import { SANDBOXES_DIR, capture, die, readJson, runInherit } from '../../core/util.mjs';
+import { keychainDelete, keychainGet, keychainSet } from '../../core/keychain.mjs';
+import { putRunSecret } from '../../core/runsecrets.mjs';
 import { detectRuntime } from '../../core/runtime.mjs';
 
 export const ASHP_DIR = path.join(SANDBOXES_DIR, '.ashp');
@@ -87,22 +89,58 @@ function mgmtHttps(ip, { method, route, headers = {}, body, timeoutMs = 5000 }) 
 
 // --- secrets & config ---------------------------------------------------------
 
-// Generated once, 0600 — like the broker token. adminPassword guards the
-// management API/GUI; the db/log/ca keys encrypt ASHP's SQLite state.
-function ensureSecrets() {
-  const file = path.join(ASHP_DIR, 'secrets.json');
-  let s = readJson(file);
-  if (!s) {
-    fs.mkdirSync(ASHP_DIR, { recursive: true });
-    s = {
+// Generated once. adminPassword guards the management API/GUI; the db/log/ca
+// keys encrypt ASHP's SQLite state. In the macOS Keychain (core/keychain.mjs),
+// one item each — `ashp-db-key`, `ashp-log-key`, `ashp-ca-key`, `ashp-admin`
+// (Keychain Access shows the last one for the UI). They used to be
+// secrets.json here, in plaintext; an existing file is moved over once and
+// deleted only after every item reads back intact — losing the db key loses
+// ASHP's database.
+const KC = { dbKey: 'ashp-db-key', logKey: 'ashp-log-key', caKey: 'ashp-ca-key', adminPassword: 'ashp-admin' };
+const KC_ADMIN = KC.adminPassword;
+export function ensureSecrets({ kc = { get: keychainGet, set: keychainSet }, dir = ASHP_DIR } = {}) {
+  const file = path.join(dir, 'secrets.json');
+  const legacy = readJson(file);
+  const out = {};
+  for (const [key, account] of Object.entries(KC)) out[key] = kc.get(account);
+  const missing = Object.keys(KC).filter((k) => !out[k]);
+  if (missing.length) {
+    if (legacy && missing.length < Object.keys(KC).length) {
+      throw new Error(`the Keychain holds only part of ASHP's secrets (missing ${missing.join(', ')}) and ${file} `
+        + 'exists too — not guessing which is right; fix it by hand');
+    }
+    const fresh = legacy || {
       dbKey: crypto.randomBytes(32).toString('hex'),
       logKey: crypto.randomBytes(32).toString('hex'),
       caKey: crypto.randomBytes(32).toString('hex'),
       adminPassword: crypto.randomBytes(18).toString('base64url'),
     };
-    fs.writeFileSync(file, JSON.stringify(s, null, 2), { mode: 0o600 });
+    for (const k of missing) {
+      kc.set(KC[k], fresh[k]);
+      out[k] = fresh[k];
+    }
+  } else if (legacy && Object.keys(KC).some((k) => legacy[k] !== out[k])) {
+    throw new Error(`${file} and the Keychain disagree about ASHP's secrets — not deleting either; fix it by hand`);
   }
-  return s;
+  // Only now: every item is in the Keychain and read back (keychainSet checks).
+  if (legacy) fs.rmSync(file, { force: true });
+  return out;
+}
+
+// The env ASHP's entrypoint reads its secrets from, as a file the wrapper
+// sources (ashp/pre-entrypoint.sh). Values are hex/base64url — no quoting.
+function ashpEnvFile(secrets) {
+  return [`ASHP_DB_KEY=${secrets.dbKey}`, `ASHP_LOG_KEY=${secrets.logKey}`,
+    `ASHP_CA_KEY=${secrets.caKey}`, `ASHP_ADMIN_PASSWORD=${secrets.adminPassword}`]
+    .map((l) => `export ${l}`).join('\n') + '\n';
+}
+
+// Into the ASHP container's RAM, right after it starts — the wrapper waits for
+// it. Never `-e`: that baked the keys into the container's config on the Mac.
+function handInAshpSecrets(runtime, secrets) {
+  if (putRunSecret(runtime, ASHP_CONTAINER, 'ashp.env', ashpEnvFile(secrets), { owner: 'root' }) !== 'tmpfs') {
+    die(`${ASHP_CONTAINER} has no /run/vivary tmpfs (it was just created with one)`);
+  }
 }
 
 // Render conf/ashp.json + stage the sysctl wrapper. Secrets go in as env:
@@ -221,7 +259,7 @@ async function waitHealthy(ip, attempts = 60) {
 // dnsmasq catch-all to ASHP's vivary-egress IP; pass it only when known
 // ahead of boot (Docker static IP). On Apple it's null — the pre-entrypoint
 // wrapper computes it inside the container (see ashp/pre-entrypoint.sh).
-function ashpRunArgs(secrets, transparentIp) {
+function ashpRunArgs(transparentIp) {
   const args = [
     '--name', ASHP_CONTAINER,
     '--entrypoint', '/vivary/pre-entrypoint.sh',
@@ -232,10 +270,8 @@ function ashpRunArgs(secrets, transparentIp) {
     '-v', `${path.join(ASHP_DIR, 'data')}:/data`,
     '-v', `${path.join(ASHP_DIR, 'bin')}:/vivary`,
     '-v', `${MGMT_TLS_HOST_DIR}:${MGMT_TLS_CONTAINER_DIR}`,
-    '-e', `ASHP_DB_KEY=${secrets.dbKey}`,
-    '-e', `ASHP_LOG_KEY=${secrets.logKey}`,
-    '-e', `ASHP_CA_KEY=${secrets.caKey}`,
-    '-e', `ASHP_ADMIN_PASSWORD=${secrets.adminPassword}`,
+    // The keys arrive after the start, into this RAM (handInAshpSecrets).
+    '--tmpfs', '/run/vivary',
     '-e', 'ASHP_TRANSPARENT=true',
   ];
   if (transparentIp) args.push('-e', `ASHP_TRANSPARENT_IP=${transparentIp}`);
@@ -251,10 +287,11 @@ const ASHP_CMD = ['node', 'server/src/index.js', '--config', '/etc/ashp/ashp.jso
 // catch-all to its own internal NIC), then discover the IP it got.
 function startAshpApple(secrets) {
   const r = capture('container', ['run', '-d',
-    ...ashpRunArgs(secrets, null),
+    ...ashpRunArgs(null),
     '--network', 'default', '--network', EGRESS_NET,
     ASHP_IMAGE, ...ASHP_CMD]);
   if (r.status !== 0) die(`cannot start ASHP: ${r.stderr || r.stdout}`);
+  handInAshpSecrets('container', secrets);
   return ashpEgressIp('container')
     || die(`ASHP started but has no address on ${EGRESS_NET}`);
 }
@@ -265,7 +302,7 @@ function startAshpApple(secrets) {
 function startAshpDocker(secrets, net) {
   const ip = subnetAddr(net.subnet, 2);
   let r = capture('docker', ['create',
-    ...ashpRunArgs(secrets, ip), '--network', 'bridge', ASHP_IMAGE, ...ASHP_CMD]);
+    ...ashpRunArgs(ip), '--network', 'bridge', ASHP_IMAGE, ...ASHP_CMD]);
   if (r.status !== 0) die(`cannot create ASHP container: ${r.stderr || r.stdout}`);
   r = capture('docker', ['network', 'connect', '--ip', ip, EGRESS_NET, ASHP_CONTAINER]);
   if (r.status !== 0) {
@@ -274,6 +311,7 @@ function startAshpDocker(secrets, net) {
   }
   r = capture('docker', ['start', ASHP_CONTAINER]);
   if (r.status !== 0) die(`cannot start ASHP: ${r.stderr || r.stdout}`);
+  handInAshpSecrets('docker', secrets);
   return ip;
 }
 
@@ -303,7 +341,7 @@ export async function ensureAshp(runtime) {
     die(`ASHP failed to become healthy on ${ip}:${MGMT_PORT} (logs: vivary egress logs)`);
   }
   console.log(`==> vivary egress proxy (ASHP) started on ${ip}`);
-  console.log(`    Policy UI: https://${ip}:${MGMT_PORT}/ (user: admin, password: ${path.join(ASHP_DIR, 'secrets.json')}; self-signed cert)`);
+  console.log(`    Policy UI: https://${ip}:${MGMT_PORT}/ (user: admin; password: Keychain Access, item "vivary: ${KC_ADMIN}"; self-signed cert)`);
   return { ip, adminPassword: secrets.adminPassword };
 }
 
@@ -335,22 +373,26 @@ async function mgmt(ip, adminPassword, method, route, body, { soft = false } = {
 }
 
 // Each egress sandbox is one ASHP agent (name = sandbox name, own token).
-// Tokens are plaintext-visible only at creation/rotation, persisted 0600 in
-// .ashp/agents/<name>; a lost token (or wiped ASHP db) is re-rotated here.
+// Tokens are visible only at creation/rotation; kept in the Keychain as
+// `ashp-agent:<name>` (they used to be files in .ashp/agents/, moved over once).
+// A lost token (or a wiped ASHP db) is re-rotated here.
+const kcAgent = (name) => `ashp-agent:${name}`;
 export async function ensureAgent(ip, adminPassword, name) {
-  const tokenFile = path.join(ASHP_DIR, 'agents', name);
-  fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+  const legacyFile = path.join(ASHP_DIR, 'agents', name);
+  if (fs.existsSync(legacyFile)) {
+    keychainSet(kcAgent(name), fs.readFileSync(legacyFile, 'utf8').trim());
+    fs.rmSync(legacyFile, { force: true });
+  }
   const agents = await mgmt(ip, adminPassword, 'GET', '/agents');
   const existing = agents.find((a) => a.name === name);
-  if (existing && fs.existsSync(tokenFile)) {
-    return fs.readFileSync(tokenFile, 'utf8').trim();
-  }
+  const kept = keychainGet(kcAgent(name));
+  if (existing && kept) return kept;
   const created = existing
     ? await mgmt(ip, adminPassword, 'POST', `/agents/${existing.id}/rotate-token`)
     : await mgmt(ip, adminPassword, 'POST', '/agents',
         { name, description: 'vivary sandbox' });
   if (!created.token) die(`ASHP did not return a token for agent '${name}'`);
-  fs.writeFileSync(tokenFile, created.token, { mode: 0o600 });
+  keychainSet(kcAgent(name), created.token);
   return created.token;
 }
 
@@ -362,6 +404,7 @@ export async function ensureAgent(ip, adminPassword, name) {
 // never-approved allow rules.
 export async function purgeAgent(name, runtime) {
   fs.rmSync(path.join(ASHP_DIR, 'agents', name), { force: true });
+  keychainDelete(kcAgent(name));
   runtime = runtime || detectRuntime();
   if (!ashpRunning(runtime)) return;
   const ip = ashpEgressIp(runtime);

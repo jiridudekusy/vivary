@@ -7,21 +7,38 @@ import http from 'node:http';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CLI_DIR, SANDBOXES_DIR, die } from './util.mjs';
+import { CLI_DIR, SANDBOXES_DIR, capture, die } from './util.mjs';
 import { loadSandbox, listSandboxNames, sandboxDir } from './sandbox.mjs';
 import { getPlugins } from './plugins.mjs';
+import { putRunSecret } from './runsecrets.mjs';
 
 export const BROKER_DIR = path.join(SANDBOXES_DIR, '.broker');
 export const BROKER_PORT = Number(process.env.SBX_BROKER_PORT || 7377);
 
-// Per-sandbox broker token. Each sandbox gets its own random token, persisted
-// in its state dir (0600) and injected only into that container. The broker
-// authorizes a request by matching this token back to its sandbox, so the
-// capabilities a request runs with are bound to the token holder — never to a
-// client-supplied name, which any sandbox could forge to borrow another
-// sandbox's host-open / clipboard access.
+// Per-sandbox broker token. Each sandbox has its own random token, held only
+// by that sandbox. The broker authorizes a request by matching the token back
+// to its sandbox, so the capabilities a request runs with are bound to the
+// token holder — never to a client-supplied name, which any sandbox could
+// forge to borrow another sandbox's host-open / clipboard access.
+//
+// The token is never stored (vault step, 2026-11-21). Every container start
+// makes a fresh one: the Mac keeps only its sha256 (broker-token.sha256, not a
+// secret), and the token itself goes into the container through `exec` onto a
+// tmpfs at /run/vivary — RAM only. It used to be a file here AND a `-e`
+// variable baked into the container's config (Apple's config.json, `docker
+// inspect`), i.e. in plaintext on the Mac's disk twice.
+//
+// LEGACY: a kept container created before this has the old token baked into
+// its env and no /run/vivary tmpfs. Its plaintext `broker-token` file keeps
+// working until the container is recreated; tart guests use it too (their
+// env file is written into the VM at boot).
+const tokenFile = (name) => path.join(sandboxDir(name), 'broker-token');
+const hashFile = (name) => path.join(sandboxDir(name), 'broker-token.sha256');
+const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+
+// The legacy plaintext token (tart, and containers from before).
 export function sandboxBrokerToken(name) {
-  const file = path.join(sandboxDir(name), 'broker-token');
+  const file = tokenFile(name);
   if (!fs.existsSync(file)) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, crypto.randomBytes(24).toString('hex'), { mode: 0o600 });
@@ -29,23 +46,67 @@ export function sandboxBrokerToken(name) {
   return fs.readFileSync(file, 'utf8').trim();
 }
 
-const tokenMatches = (have, want) => {
-  const a = Buffer.from(have);
-  return a.length === want.length && crypto.timingSafeEqual(a, want);
-};
+// A fresh token for one container run: only its hash is kept.
+export function issueBrokerToken(name) {
+  const token = crypto.randomBytes(24).toString('hex');
+  writeHash(name, token);
+  return token;
+}
 
-// A missing token file is an ordinary miss. Any other failure is logged: when
-// the Mac runs out of file handles this read is what fails, and swallowing it
-// turned ENFILE into "DENIED bad token" — on 2026-10-18 two running sandboxes
-// were denied at the same instant 36 s before a watchdog reset, and the log had
-// no ENFILE line to say why.
-function readToken(name) {
+// Put a fresh token into a started container. 'tmpfs' when it went to RAM;
+// 'legacy' for a container without the tmpfs (created before), which keeps
+// the token baked into its env.
+export function deliverBrokerToken(cfg, runtime, cname, { run = capture, probed } = {}) {
+  const token = crypto.randomBytes(24).toString('hex');
+  // Hash first: the moment the file appears inside, it must already work.
+  const prev = readHashFile(cfg.name);
+  writeHash(cfg.name, token);
+  let mode;
   try {
-    return fs.readFileSync(path.join(sandboxDir(name), 'broker-token'), 'utf8').trim();
+    mode = putRunSecret(runtime, cname, 'broker-token', token, { run, probed });
   } catch (e) {
-    if (e?.code !== 'ENOENT') brokerError(`token read for '${name}'`, e);
-    return null;
+    restoreHash(cfg.name, prev);
+    throw e;
   }
+  if (mode === 'legacy') {
+    restoreHash(cfg.name, prev);
+    sandboxBrokerToken(cfg.name);
+    return 'legacy';
+  }
+  // The container has the new scheme, so the old plaintext token is dead.
+  fs.rmSync(tokenFile(cfg.name), { force: true });
+  return 'tmpfs';
+}
+
+function readHashFile(name) {
+  try { return fs.readFileSync(hashFile(name), 'utf8'); } catch { return null; }
+}
+function writeHash(name, token) {
+  fs.mkdirSync(sandboxDir(name), { recursive: true });
+  fs.writeFileSync(hashFile(name), `${sha256(token)}\n`, { mode: 0o600 });
+}
+function restoreHash(name, prev) {
+  if (prev === null) fs.rmSync(hashFile(name), { force: true });
+  else fs.writeFileSync(hashFile(name), prev, { mode: 0o600 });
+}
+
+// The sha256s that currently authorize a sandbox. A missing file is an
+// ordinary miss. Any other failure is logged: when the Mac runs out of file
+// handles this read is what fails, and swallowing it turned ENFILE into
+// "DENIED bad token" — on 2026-10-18 two running sandboxes were denied at the
+// same instant 36 s before a watchdog reset, and the log had no ENFILE line to
+// say why.
+function readHashes(name) {
+  const out = [];
+  for (const [file, hashed] of [[hashFile(name), true], [tokenFile(name), false]]) {
+    try {
+      const v = fs.readFileSync(file, 'utf8').trim();
+      if (v) out.push(hashed ? v : sha256(v));
+    } catch (e) {
+      if (e?.code !== 'ENOENT') brokerError(`token read for '${name}'`, e);
+    }
+  }
+  return out;
 }
 
 // token -> sandbox name. Resolving a token used to walk EVERY sandbox dir
@@ -66,32 +127,25 @@ const tokenCache = { map: new Map(), builtAt: 0 };
 function rebuildTokenCache(now) {
   const map = new Map();
   for (const name of listSandboxNames()) {
-    const tok = readToken(name);
-    if (tok) map.set(tok, name);
+    for (const h of readHashes(name)) map.set(h, name);
   }
   tokenCache.map = map;
   tokenCache.builtAt = now;
 }
 
-// Resolve the sandbox whose broker token equals the presented one, comparing in
-// constant time. Returns null if none matches.
+// Resolve the sandbox whose broker token is the presented one. Only hashes
+// are compared (a map lookup on sha256(token)), so no timing side channel on
+// the token itself. Returns null if none matches.
 export function sandboxByToken(presented, { now = Date.now() } = {}) {
   if (!presented) return null;
-  const want = Buffer.from(String(presented));
-  const lookup = () => {
-    for (const [tok, name] of tokenCache.map) {
-      if (tokenMatches(tok, want)) return name;
-    }
-    return null;
-  };
-  let name = lookup();
+  const want = sha256(presented);
+  let name = tokenCache.map.get(want);
   if (!name && now - tokenCache.builtAt >= REBUILD_MS) {
     rebuildTokenCache(now);
-    name = lookup();
+    name = tokenCache.map.get(want);
   }
   if (!name) return null;
-  const current = readToken(name);
-  if (!current || !tokenMatches(current, want)) {
+  if (!readHashes(name).includes(want)) {
     tokenCache.builtAt = 0; // stale entry: force a rebuild on the next miss
     return null;
   }
@@ -152,15 +206,25 @@ export async function ensureBroker() {
 
 // Broker announcement for the sandbox (when any enabled plugin needs it) —
 // as an env object; brokerEnvArgs renders the docker-args form.
+// Only the URL: the token is in /run/vivary (or, legacy, already in the
+// container's own env), and an exec'd process does not need it in its env.
+export const brokerNeeded = (cfg) => getPlugins().some((p) => p.needsBroker?.(cfg));
+
 export async function brokerEnvVars(cfg) {
-  const needed = getPlugins().some((p) => p.needsBroker?.(cfg));
-  if (!needed) return {};
+  if (!brokerNeeded(cfg)) return {};
   const { url } = await ensureBroker();
-  return { SBX_OPEN_URL: url, SBX_OPEN_TOKEN: sandboxBrokerToken(cfg.name) };
+  return { SBX_OPEN_URL: url };
 }
 
-export async function brokerEnvArgs(cfg) {
-  return Object.entries(await brokerEnvVars(cfg)).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+// Run args for a NEW container: the URL; the token goes onto its tmpfs after
+// the start (deliverBrokerToken). A throwaway --rm run starts its payload at
+// once, before anything could be delivered, so it carries a fresh token in
+// its env instead — its config is deleted with it.
+export async function brokerEnvArgs(cfg, { rm = false } = {}) {
+  const env = await brokerEnvVars(cfg);
+  if (!env.SBX_OPEN_URL) return [];
+  if (rm) env.SBX_OPEN_TOKEN = issueBrokerToken(cfg.name);
+  return Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 }
 
 export function cmdBroker(argv) {

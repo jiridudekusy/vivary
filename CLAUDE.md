@@ -172,6 +172,38 @@ English, converse with the user in Czech.
   getPlugins() unguarded (it die()s when plugins are not loaded): use
   `pluginsLoaded()`. Plan for the rest (vault):
   docs/design/2026-11-11-security-model-alignment.md §7.
+- VAULT (2026-11-21, user chose the macOS Keychain over a passkey-unlocked
+  vault): no vivary secret sits in plaintext on the Mac or in a container's
+  config. Long-lived ones live in the login Keychain (core/keychain.mjs,
+  service `vivary`, values via STDIN — `security add-generic-password ... -w`
+  as the last option reads the value twice from stdin, so values are one line;
+  never argv): `ashp-keys` (db/log/ca keys, compact JSON), `ashp-admin` (UI
+  password — its own item so it can be looked up), `ashp-agent:<name>`.
+  Per-run ones go into the container's RAM: every new container gets
+  `--tmpfs /run/vivary` (runtimes/spec.mjs) and after each start the host
+  writes them there through `<runtime> exec -i --user root` with the value on
+  stdin (core/runsecrets.mjs) — never `-e`, which baked them into Apple's
+  config.json / `docker inspect` for the container's whole life. Plugins hand
+  theirs in with `runSecrets(ctx, { tmpfs }) -> { name: content }` (core calls
+  it right after the start, before postUp; boot hooks that need one WAIT for
+  its file). Broker token: fresh per start, the Mac keeps only its sha256
+  (`broker-token.sha256`); the broker looks requests up by hash. npm: the
+  transformed ~/.npmrc (${VAR} expanded on the host) goes to
+  /run/vivary/npmrc and npm reads it as its GLOBAL config (/usr/etc/npmrc is a
+  symlink there, baked in; a dangling link is ignored) so ~/.npmrc keeps only
+  uunpm's ignore-scripts. Egress agent token: /run/vivary/egress-token, the
+  11-egress hook waits up to 60 s. ASHP: keys from the Keychain into
+  /run/vivary/ashp.env of the ASHP container, pre-entrypoint.sh waits and
+  sources it. Old plaintext (secrets.json, .ashp/agents/*) is moved into the
+  Keychain once and deleted — only after the Keychain write succeeded (losing
+  dbKey loses ASHP's db). LEGACY: a kept container created before has no
+  /run/vivary tmpfs — `hasRunTmpfs` says so, it keeps its baked env / Mac
+  files (broker-token, dot-config/npmrc-import) and every start prints the
+  --recreate hint; nothing is recreated automatically. tart guests still use
+  the legacy broker token (env file written into the VM). LIMIT, said plainly
+  to the user: Keychain items are readable without a prompt by any process
+  running as the user (`security`) — protection is at rest, from backups, and
+  from sandboxes (no Keychain access there), not from local malware.
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).

@@ -16,10 +16,17 @@ fi
 
 export DISPLAY="${DISPLAY:-:99}"
 base="${SBX_OPEN_URL%/}/clipboard"
-auth="token=${SBX_OPEN_TOKEN:-}&name=${SBX_SANDBOX_NAME:-}"
 last=""
 
 while :; do
+    # Read every round: at boot this starts before vivary hands the token in
+    # (/run/vivary, RAM), and a container from before that has it in its env.
+    tok="${SBX_OPEN_TOKEN:-}"
+    [ -r /run/vivary/broker-token ] && tok="$(cat /run/vivary/broker-token)"
+    # Not handed in yet (the first second after a start): ask nothing rather
+    # than fill the broker log with "bad token".
+    [ -n "$tok" ] || { sleep 1; continue; }
+    auth="token=${tok}&name=${SBX_SANDBOX_NAME:-}"
     fp="$(curl -s --max-time 3 "$base?format=fingerprint&$auth" || true)"
     if [ -n "$fp" ] && [ "$fp" != "$last" ] && ! printf '%s' "$fp" | grep -q '"ok":false'; then
         targets="$(curl -s --max-time 3 "$base?format=targets&$auth" || true)"

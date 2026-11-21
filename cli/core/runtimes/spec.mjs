@@ -24,7 +24,9 @@ export async function buildRunSpec(ctx, {
     for (const p of plugins) {
       if (p.runArgs) extraArgs.push(...(await p.runArgs(ctx) || []));
     }
-    extraArgs.push(...(await brokerEnv(cfg)));
+    extraArgs.push(...(await brokerEnv(cfg, { rm })));
+    // RAM for the secrets handed in after every start (core/runsecrets.mjs).
+    if (!rm) extraArgs.push('--tmpfs', '/run/vivary');
   }
   return {
     name: ctx.cname,
