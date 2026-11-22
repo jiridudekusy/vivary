@@ -1,0 +1,556 @@
+# vivary
+
+*A vivary is an enclosure for keeping live creatures under observation.*
+
+Run AI coding agents (Claude Code, Codex, Cursor) in isolated containers — **Docker**
+or **Apple `container`** — while keeping host-level convenience: shared chat
+history, one-time login, imported settings/skills/MCP, a browser the agent can
+drive (headless, or watched and driven in the passkey-protected web UI), and SSH
+access for Claude Desktop.
+
+```bash
+cd ~/work/myproj
+slaude               # sandboxed Claude Code for this project. That's it.
+```
+
+## Install
+
+```bash
+npm install -g vivary        # the `vivary`, `slaude`, `sodex` and `sursor` commands
+vivary build                 # compose + build the image
+```
+
+From a checkout instead: `npm install --prefix cli && npm install -g ./cli`.
+
+Requires Node.js >= 20 on the host and Docker and/or Apple `container`.
+
+## License
+
+MIT
+
+## CLI
+
+```
+vivary start | run [name]   start an interactive agent session — auto-creates the
+                         sandbox on first use (name + workspace = current dir);
+                         extra args are passed to the agent
+vivary create [name]        explicit create with an interactive import wizard
+                         (MCP servers, skills, settings)
+vivary init [name]          write <workspace>/.vivary.json (committable project
+                         config) from the sandbox's current config, approved
+vivary up [name]            long-running container with sshd (Claude Desktop, IDEs)
+vivary down [name]          stop the long-running container
+vivary ls                   list sandboxes across both runtimes
+vivary config [name]        the sandbox's settings and where each one comes from
+vivary set [name] --memory 8g --headed=off ...
+                         change the sandbox's own settings without starting it;
+                         says whether that takes the next start, a restart or
+                         a --recreate (not for --publish / --volume)
+vivary approve [name]       review and approve a changed .vivary.json without
+                         starting the sandbox
+vivary profile [ls|show p]  named profiles (~/.vivary/profiles/<p>.json) and
+                         the sandboxes using them
+vivary stats [--trim]       how hard the VMs press on the Mac (RAM, CPU, open
+                         files); --trim releases the host files they pin
+vivary exec [name] -- cmd   run any command in the sandbox; on a terminal in a
+                         detachable session (type a password, Ctrl-\ detaches)
+vivary attach [name]        back into a session started by exec
+vivary shell [name]         bash in the sandbox (auto-starts it if not running)
+vivary rm [name] [--purge]  remove container (--purge deletes state too)
+vivary build [base|agents]  build images
+vivary help                 full help with options and examples
+```
+
+Agent launchers (equivalent to `vivary start --agent ... -- args`):
+
+- **`slaude`** — sandboxed **Claude Code** in the current directory (`slaude -r`
+  passes `-r` to claude)
+- **`sodex`** — sandboxed **Codex**
+- **`sursor`** — sandboxed **Cursor CLI agent**
+
+Common options: `--sudo` (full root in the sandbox), `--headed`, `--docker`, `--memory 8g`, `--cpus 6`, `--runtime
+docker|container`, `--name`, `--workspace`, `--agent`. Environment defaults:
+`SANDBOX_RUNTIME`, `SANDBOX_MEMORY`, `SANDBOX_CPUS`, `SANDBOXES_DIR`, `SSH_PORT`.
+
+**Runtime selection**: chosen when the sandbox is created (`--runtime`, else
+`$SANDBOX_RUNTIME`, else autodetect — `container` wins if installed) and
+stored in the sandbox config; `start`/`up` always use the stored runtime.
+`vivary ls` shows sandboxes of both runtimes side by side.
+
+## Project config (`.vivary.json`)
+
+A committable `<workspace>/.vivary.json` holds the full sandbox
+configuration — create it with `vivary init`:
+
+```json
+{
+  "agent": "claude",
+  "memory": "8g",
+  "cpus": "6",
+  "flags": { "egress": true, "host-open": true },
+  "egress": {
+    "presets": ["anthropic"],
+    "allow": ["https://registry.npmjs.org/*"]
+  }
+}
+```
+
+Precedence, highest first: CLI flags > `.vivary.json` > what was set on the
+sandbox itself (sticky CLI flags) > its **profiles** (the last listed wins) >
+`~/.vivary/vivary.json` (global defaults, used **only** when no project file
+exists) > built-ins. Lists (`publish`, `volume`) from profiles and the
+defaults add to the list instead of replacing it; `dockerd` merges key by key.
+Turn an inherited flag off on one sandbox with `--<flag>=off`. CLI flags that
+extend the file are written back (union only — nothing is ever removed).
+Unknown keys fail loudly. `vivary config <name>` prints every setting with the
+layer it came from. A changed file blocks every start until it is approved —
+on a terminal at the next start, with `vivary approve <name>`, or in the web UI.
+
+`"dockerd"` is the daemon.json of the Docker inside a `--docker` sandbox —
+`insecure-registries`, `registry-mirrors`, `dns`, … (`hosts` is refused: it
+would put the Docker API on the network). It is applied on every start, no
+`--recreate`: keys dockerd reloads live are reloaded, others restart it (which
+stops the containers running inside — vivary says so).
+
+### Profiles
+
+A profile is `~/.vivary/profiles/<name>.json` with the same keys as
+`.vivary.json` (except `profiles`): agent, runtime, memory, cpus, flags,
+egress, dockerd. Give a sandbox one or more with `--profile a --profile b`
+(sticky; `--profile none` clears), or list them in `.vivary.json` as
+`"profiles": [...]`. A profile edit reaches every sandbox using it on its next
+start (a change baked into the container, like memory, asks for `--recreate`).
+agent and runtime come from a profile only when the sandbox is created —
+after that they are the sandbox's own. Profiles live on the Mac, out of the
+agent's reach, so they need no approval.
+
+```json
+{ "memory": "12g", "flags": { "docker": true, "headed": true },
+  "dockerd": { "insecure-registries": ["registry.local:5000"] } }
+```
+
+Because the agent inside the sandbox can edit the file, every content change
+must be approved: `start`/`up`/`shell` show a diff against the last approved
+copy and ask `[y/N]` (non-interactive runs refuse). Nothing inside the
+sandbox can approve.
+
+With `flags.egress`, the `egress` section is synced to the ASHP proxy as
+allow rules (named `vivary:<sandbox>:…`; rules made by hand in the policy UI
+are never touched). Built-in presets: `anthropic`, `openai`, `cursor` — the
+minimal domains each agent needs for login + prompts (see
+`cli/plugins/egress/presets.mjs` for the empirically verified lists and
+caveats).
+
+## Image
+
+One fat image (`agent-sandbox-agents`) composed by `vivary build` from the
+core Dockerfile plus every plugin fragment — Ubuntu 24.04 with:
+
+| Component | Version / source |
+|---|---|
+| Node.js | 24 (NodeSource) |
+| Java | Azul Zulu JDK 21 |
+| Build tools | Maven (apt), Gradle 8.14 |
+| Playwright | latest, global npm install, Chromium pre-installed (`/opt/pw-browsers`, agent-writable so projects can `npx playwright install`) |
+| GUI stack | Xvfb + openbox + x11vnc on the sandbox's loopback (headed browser mode) |
+| sshd | key-only, user `agent` (for Claude Desktop / IDE access) |
+
+Browser modes:
+
+- **Headless** (default): Playwright works out of the box.
+- **Headed**: `--headed` starts Xvfb (`:99`) + x11vnc — watch and control the
+  browser in `vivary web` (the address is printed on start, again with
+  `vivary headed <name>`; run agent code with `headless: false`). VNC is never
+  on the network: see *Screens* under the web UI.
+
+One image serves all agents — Claude can call Codex (`codex exec ...`) and
+vice versa within the same sandbox.
+
+**Host-open** (`--host-open`, sticky per sandbox): `xdg-open`/`open`/`code`
+inside the sandbox forward to a small host-side broker (`vivary broker`,
+auto-started) — URLs open in the **host browser** (http/https only; e.g.
+OAuth login flows open automatically via `$BROWSER`), files open in the
+**host editor** (VS Code), restricted to sandbox workspaces. Requests are
+token-authenticated and logged to `~/.vivary/.broker/broker.log`.
+This is a deliberate, narrowly-scoped hole in the sandbox — enable per
+sandbox only when you want it.
+
+Because the agent controls the workspace, the broker is defensive about
+what it hands to the host:
+
+- **URLs**: loopback/private/link-local hosts are refused (no using the
+  host browser to reach the broker itself, dev servers, router admin or
+  cloud metadata). Optional per-sandbox allow-list of public domains via
+  `"hostOpenDomains": ["example.com", ...]` in `sandbox.json` (subdomains
+  included; empty/absent = any public host).
+- **Files opened with the host's default app** (`open`, not `code`) are
+  limited to safe document/media types (pdf, office, images, text, av);
+  directories/bundles (`.app`, …) and files with the execute bit are
+  refused, so a workspace `.command`/`.app`/`.pkg` can't launch on the
+  host. Extend the type list with `"hostOpenExtensions": ["ext", ...]`.
+  Opening in the editor (`code <file>`) is always allowed (it only edits).
+
+**OAuth login just works with `--host-open`**: `claude /login` (and `codex
+login`) run their callback server on the *container's* localhost while the
+browser opens on the *host*. The broker detects `redirect_uri=
+http://localhost:PORT` in the authorize URL, listens on the host's
+`127.0.0.1:PORT` for 5 minutes and replays the browser's redirect into the
+sandbox (via `<runtime> exec curl`, i.e. inside the container's network
+namespace). One login per sandbox, credentials persist.
+
+**Own node_modules** (`--node-modules[=N]`, sticky per sandbox): every
+workspace dir with a `package.json` (scanned N levels deep, default 4, no
+symlink following) gets its `node_modules` overlaid with a per-sandbox
+directory — Linux modules never mix with the host's macOS ones, and the
+host's existing `node_modules` stay untouched underneath. Docker uses one
+bind mount per package dir; Apple `container` (which caps out at ~120
+virtiofs shares) uses a single share plus in-VM bind mounts, scaling to
+hundreds of packages. New `package.json` files created inside the sandbox
+are picked up **live** by an inotify watcher (overlay lands before the first
+`npm install`). Host-side additions are picked up on restart.
+`--node-modules=0` disables. Overlay failures are loud, never silent.
+
+In `.vivary.json` the value may instead be an **array of workspace-relative
+dirs** — the exact set to overlay, with no scanning and no live watcher:
+
+```json
+{ "flags": { "node-modules": [".", "apps/web", "packages/lib"] } }
+```
+
+Entries must stay inside the workspace (no absolute paths, no `..`, no
+symlinks) and must exist — a typo fails loudly instead of silently doing
+nothing.
+
+**Published ports** (`-p/--publish HOST:CONTAINER`, sticky, repeatable):
+docker syntax (`-p 8080:80`, `-p 3000`, `-p 0.0.0.0:80:80/tcp`), passed
+straight through to Docker or Apple `container`. One deliberate difference
+from docker: **without a host IP the port binds `127.0.0.1` only**, so a
+service inside an untrusted sandbox does not appear on the LAN by accident —
+write `0.0.0.0:8080:80` when you mean to expose it. In `.vivary.json`:
+`{ "flags": { "publish": ["8080:80", "3000"] } }`. On the `tart` runtime
+there is no publish mechanism (the macOS guest has its own vmnet IP the host
+can reach directly), so vivary prints the guest URL instead.
+
+**Extra mounts** (`-v/--volume HOST[:GUEST][:ro]`, sticky, repeatable):
+docker syntax, and a **bare host path mounts at the same absolute path**
+inside the sandbox (`-v ~/models`, `-v ~/models:ro`) — the same invariant the
+workspace uses. Works on all three runtimes (Docker and Apple `container`
+render `-v`, `tart` renders a virtiofs share mounted at the guest path). The
+host path must exist; a typo fails loudly.
+
+The two sources are **not equally trusted**, because a mount is direct host
+filesystem access and `.vivary.json` is agent-writable:
+
+- `~/.vivary` is refused from either source — it holds every sandbox's broker
+  token and the approved-config baseline, so mounting it would dismantle the
+  approval gate itself.
+- From `.vivary.json`, credential stores and system dirs (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.npmrc`, `~/Library/Keychains`,
+  `/etc`, …) are refused. Pass such a path on the command line if you really
+  mean it — there a human typed it.
+- A CLI mount that *contains* `~/.vivary` (e.g. `-v ~`) is allowed but warns
+  loudly.
+
+**npmrc import** (`--npmrc[=…]`, sticky per sandbox): carries the host
+`~/.npmrc` into the sandbox, re-read on every start (token rotation just
+works). Values: bare = whole file; `registries` = no credentials;
+comma list = selective (`default`, `@scope`, hostname fragment — e.g.
+`--npmrc=default,nexus.cams`); `off` disables. localhost registries are
+rewritten to `host.docker.internal` (including the auth keys npm matches by
+URL), `cafile` paths are copied along, and `${VAR}` token references are
+injected via container env at start — never stored in the sandbox state.
+
+**Clipboard bridge** (`--clipboard`, sticky per sandbox): the host clipboard
+reaches the sandbox — **Ctrl+V pastes a host screenshot straight into Claude
+Code** (it reads images via `xclip`, which is shimmed to fetch from the
+broker), `pbpaste`/`xclip -o` return host clipboard text, and `pbcopy` inside
+sets the host clipboard. X-native agents are covered too — Codex reads the
+clipboard from the X server directly (arboard), so a bare Xvfb plus a sync
+daemon mirror the host clipboard into the X CLIPBOARD selection.
+Per-sandbox permission enforced by the broker;
+reads/writes are logged. Note the host clipboard may hold sensitive data —
+enable only where you want it.
+
+**Tailscale** (`--tailscale`, sticky per sandbox): tailnet integration in
+both directions. Outbound: raw 100.x connectivity works through the host's
+NAT out of the box; MagicDNS names (short + FQDN) are injected into the
+container's /etc/hosts from `tailscale status` at every start. Inbound:
+`vivary up` publishes the sandbox's sshd on a stable per-sandbox port
+(22000+), so any tailnet device reaches it at `<host-magicdns>:<port>` —
+Claude Desktop from your laptop, ssh from an iPad. The identity file lives
+on the container host (`~/.vivary/<name>/ssh/`); copy it to the
+client once.
+
+**Docker-in-sandbox**: start with `--docker` (sticky per sandbox) and agents
+can build and run containers inside — `dockerd` runs in the sandbox, with no
+access to the host Docker daemon. Under the docker runtime this uses
+`--privileged` (contained by the Docker Desktop VM) and a named volume for
+`/var/lib/docker` (overlay2 can't sit on overlayfs); under Apple `container`
+the sandbox is its own VM, so neither is needed.
+
+## How host sharing works
+
+Per-sandbox state lives in `~/.vivary/<name>/`:
+
+| Host path | In container | Purpose |
+|---|---|---|
+| `dot-claude/` | `/home/agent/.claude` | settings, skills, credentials, CLI config (`CLAUDE_CONFIG_DIR`) — survives container deletion |
+| `dot-config/` | `/home/agent/.config` | status line config etc. |
+| `dot-codex/` | `/home/agent/.codex` | Codex auth/state |
+| `dot-cursor/` | `/home/agent/.cursor` | Cursor CLI auth/state |
+| `ssh/` | `/home/agent/host-ssh` | SSH keypair + persisted host keys |
+| `~/.claude/projects/<workspace-slug>*` (only this project + its subdirs) | `/home/agent/host-projects/<slug>` → symlinked to `~/.claude/projects` | **chats land directly in the host's history** — but the container never sees other projects' chats |
+| `<workspace>` | same absolute path | history slug derives from cwd — identical paths mean host `claude --resume` sees container sessions natively |
+
+Consequences:
+
+- Chat history is visible on the host (`claude --resume` in the workspace) and
+  survives `vivary rm`, even `--purge`.
+- Login (`/login` inside the sandbox) happens **once per sandbox** — macOS
+  Keychain credentials can't be shared, container credentials live in
+  `dot-claude/` and survive rebuilds.
+- The `create` wizard imports only what you select: MCP servers from
+  `~/.claude.json`, skills, `settings.json` (hooks always stripped — they may
+  reference host paths; status line config is carried along). Auto-create
+  (via `start`) imports settings only.
+
+## Claude Desktop / SSH access
+
+`vivary up` runs the sandbox with sshd and prints everything needed. In Claude
+Desktop: Code tab → environment dropdown → **"+ Add SSH connection"** → enter
+the config alias `claude-sandbox-<name>` as the host.
+
+- Per-sandbox ed25519 keypair; public key = container's `authorized_keys`.
+- SSH **host keys persist** across rebuilds (no known_hosts churn); `up`
+  pre-registers them in `~/.ssh/known_hosts` and maintains a marker-delimited
+  `Host` block per sandbox in `~/.vivary/ssh/config`. Your `~/.ssh/config` only
+  gets a single managed `Include` of that file, **prepended** — in ssh_config
+  the first obtained value wins, and a global `UserKnownHostsFile /dev/null`
+  later in the file would break Desktop's host verification. `vivary rm` drops
+  the sandbox's block again (any `rm`, not just `--purge`); a later `up` writes
+  it back. Blocks an older vivary wrote straight into `~/.ssh/config` are moved
+  into the include file on the next `up`, and the pre-vivary `~/.ssh/config` is
+  kept once as `~/.ssh/config.vivary.bak`.
+- `known_hosts` cleanup on `--purge` only removes what vivary provably wrote for
+  that sandbox: the exact `HostName`/`Port` target recorded in its Host block
+  (this is what catches docker's `[localhost]:<sshPort>` and a tart guest's IP)
+  plus container-DNS names derived from the sandbox name. Unattributable
+  leftovers are never touched.
+- Apple `container`: direct connection to `claude-sandbox-<name>.<dns-domain>:22`
+  (no published ports, no conflicts). Docker publishes sshd on a **per-sandbox
+  port** (`127.0.0.1:2222` for the first sandbox, then a stable name-derived one
+  — several docker sandboxes can run at once), overridable with `SSH_PORT=`.
+  The port is persisted in `sandbox.json` and written into the managed ssh
+  alias, so `ssh claude-sandbox-<name>` and `vivary ide` keep working. It binds
+  loopback only; `--tailscale` publishes on all interfaces so other tailnet
+  devices can reach it.
+- Non-interactive SSH sessions get `CLAUDE_CONFIG_DIR`, `PLAYWRIGHT_BROWSERS_PATH`,
+  `DISPLAY` and PATH via `sshd_config SetEnv`.
+- The Desktop remote daemon's unix sockets can't be chmod'ed on the virtiofs
+  mount (EINVAL), so the entrypoint symlinks `~/.claude/remote/run` to the
+  VM-local filesystem.
+
+**Where things execute**: with Desktop connected over SSH, the agent, Bash,
+builds and sandbox-configured MCP servers run **in the container**; but
+Desktop injects its own client-side connectors (e.g. Claude in Chrome) that
+execute **on the host** — disable them in Desktop settings if you want the
+session fully contained. Plain CLI sessions (`slaude`, `vivary start`) have no
+host-side channel at all.
+
+## Web UI (`vivary web`)
+
+A phone-sized page for the sandboxes on this Mac: what runs, how to connect,
+start/stop, and the SSH device keys (`vivary key`). It listens on loopback only
+and is shared to your tailnet with `tailscale serve --https` (HTTPS
+certificates must be enabled in the Tailscale admin console).
+
+```bash
+vivary web                   # serves https://<mac>.<tailnet>.ts.net:8737/
+vivary web enroll            # (another terminal, on the Mac) register a passkey
+vivary web --stop            # stop sharing to the tailnet
+```
+
+Login is a **passkey** (Face ID / Touch ID / PIN, always with user
+verification). Passkeys need a secure context, so HTTPS on the tailnet name —
+plain HTTP works only on `localhost` (`--no-serve`, which then has passkeys of
+its own). A passkey belongs to one address: use the `ts.net` one on the Mac too.
+
+- **First passkey, and recovery:** only `vivary web enroll` on the Mac. It opens
+  the page with a one-time token in the URL fragment (one use, 10 minutes) and
+  prints nothing. With iCloud Keychain the passkey reaches your iPhone and iPad.
+  There are no recovery codes: physical access to the Mac is the way back in.
+- **Sessions:** 12 h, `__Host-` cookie (HttpOnly, Secure, SameSite=Strict),
+  CSRF token on every change, in memory only — restarting `vivary web` signs
+  everyone out. "Sign out everywhere" in the page does the same.
+- **Step-up:** adding an SSH device key and adding or removing a passkey ask for
+  a fresh passkey touch, bound to that exact request (a touch for one key cannot
+  be spent on another).
+- Every API call needs a session, loopback included — a docker-runtime sandbox
+  can reach the host's loopback through `host.docker.internal`. The tailnet
+  allowlist (`~/.vivary/web-allow`, default: the tailnet owner) still applies on
+  top. Stored in `~/.vivary/.web/`: public keys and the hash of a pending
+  enrollment token — no secret.
+- Not offered from the web: creating a sandbox, changing its workspace or
+  mounts (raw access to the Mac's disk).
+
+**One sandbox** (tap its name): how to get in — the `ssh` line for the
+tailnet and for this Mac, a `~/.ssh/config` block, *Open in Cursor / VS Code*
+links, the Paseo address (never its password) — then its settings, and
+Start / Stop / Restart / Recreate.
+
+- **Settings** are memory, CPUs, profiles and the on/off features. Saving asks
+  for a passkey touch made for exactly that change and runs `vivary set`; the
+  page then says what it takes: the next start, a restart, or a rebuild of the
+  container (which loses what was installed inside — that takes a touch too).
+  Settings that `.vivary.json` decides are shown, not editable: change the file.
+  Never from the web: the workspace, `--volume`, `--publish`.
+- **`.vivary.json` approval:** a changed project file shows as a diff against
+  the approved copy. *Approve* takes a touch bound to the sha256 of exactly
+  that content, so a file changed after you looked is refused. The page reads
+  the file without following a symlink and only if it is a small regular file.
+
+**Screens** (`--headed` sandboxes): *Open screen* on a running sandbox's card,
+or `https://<mac>.<tailnet>.ts.net:8737/vnc/<name>`. The viewer is noVNC's
+client library (npm `@novnc/novnc`, pinned), served by the web from the Mac;
+on a phone it has a keyboard button plus Esc/Tab/Ctrl and a text box that types
+into the sandbox or puts text on its clipboard. The way in is the same session:
+
+- x11vnc listens on the sandbox's `127.0.0.1` only, without a password. The
+  web runs `container exec -i <container> vnc-relay` (or `docker exec`) per
+  viewer and carries the VNC stream over the runtime's exec channel. Nothing
+  listens on any network for VNC, so another sandbox has nothing to connect
+  to, and there is no password or token to store, print or leak.
+- The WebSocket needs the session cookie and the web's own `Origin`; a screen
+  closes within seconds of sign-out, "sign out everywhere", removal of its
+  passkey or the 12 h limit.
+- Needs the current image: a container made before this still serves noVNC
+  on its network with the old 8-character password. `vivary up <name>` says
+  so; `vivary up <name> --recreate` moves it over.
+
+## Git through the Mac (`git` in `.vivary.json`)
+
+Agents use git as usual — `git clone https://github.com/...`, `git push` —
+but no git credential ever enters the sandbox: the Mac does the talking.
+
+```json
+"git": [
+  { "repo": "github.com/jiridudekusy/findmy", "push": ["agent/**"],
+    "force": ["agent/scratch/*"], "delete": ["agent/scratch/*"] },
+  { "repo": "uucodebase.plus4u.net/<awid>/<name>" },
+  { "repo": "github.com/acme/*", "push": ["feature/**"], "account": "jdk-acme" }
+]
+```
+
+- A repository no entry names cannot even be fetched. `push` lists the
+  branches the agent may update (`*` stays within one `/` segment, `**`
+  crosses it; `refs/tags/...` for tags); without it the repository is
+  read-only. A branch in `push` may be created and moved forward only;
+  `force` lists the ones that may also be rewritten (amend, rebase, reset —
+  moving a tag counts), `delete` the ones that may be deleted (both only
+  among those in `push`). Everything is checked before anything leaves the
+  Mac; the agent sees `! [remote rejected] main (vivary: ... not allowed)`.
+- How a fast-forward is proven without a copy of the repository: the broker
+  asks git for a self-contained pack (`no-thin`), indexes it in a throwaway
+  repository on the Mac (git computes every object's name from its content)
+  and walks the new commits' parents to the old tip. When the walk runs into
+  commits the server already has (the branch was merged into main and the
+  agent goes on from main; `git push origin main:agent/x` when agent/x is
+  behind), the broker asks the server: it keeps a commits-only copy
+  (`--filter=tree:0`; a full one where the server cannot filter) of the
+  repository's branches and tags in `~/.vivary/.git-cache`, fetched with the
+  Mac's own credentials. The sandbox's own `.git` is never trusted for this —
+  the agent can rewrite it.
+- **HTTPS hosts** (github.com, gitlab.com, bitbucket.org): the sandbox's git
+  is rewritten to the broker (`https://`, `git@host:` and `ssh://` spellings),
+  which adds the Mac's own credential from `git credential` (gh, Keychain).
+  `account` picks one of several logins.
+- **SSH hosts** (uuCodebase and anything else, or `"transport": "ssh"`): git's
+  ssh command in the sandbox is a shim that hands the request to the broker;
+  the broker runs only `git-upload-pack`/`git-receive-pack` with `ssh` on the
+  Mac, with your keys and `~/.ssh/config`.
+- Rules come from the approved `.vivary.json` and from profiles; a change
+  applies at the next start. Every fetch and push, allowed or not, is in the
+  broker log. Not covered: `gh`/API calls, signed pushes.
+
+## Secrets
+
+vivary keeps none of its own secrets in plaintext on the Mac or in a
+container's configuration:
+
+- **Per run, in RAM:** every new container gets a tmpfs at `/run/vivary`;
+  after each start vivary writes into it, through `exec` with the value on
+  stdin, what that run needs: the broker token (fresh per start — the Mac
+  keeps only its sha256), the npm credentials from your `~/.npmrc` (`--npmrc`;
+  npm reads them as its global config) and the egress agent token. Before,
+  they were `-e` variables baked into the container's config (Apple's
+  `config.json`, `docker inspect`) and copies under `~/.vivary`.
+- **Long-lived, in the login Keychain** (service `vivary`): ASHP's database,
+  log and CA keys, its admin password (`vivary: ashp-admin` in Keychain
+  Access, for the policy UI) and the agent tokens. An existing
+  `~/.vivary/.ashp/secrets.json` is moved over once and deleted.
+- What it protects against: backups and disk images, and every sandbox (none
+  can reach the Mac's Keychain). Not against a program running as you on the
+  unlocked Mac — it can read Keychain items through `security` like vivary
+  does; macOS protects items per app only for signed apps.
+- A container created before this keeps the old way until
+  `vivary up <name> --recreate`; every start says so. tart guests still use
+  the old broker token. Your own `~/.npmrc` and the agent logins
+  (`dot-claude`, `dot-codex`) are untouched.
+
+## Security boundary
+
+The container sees only: the workspace, its own per-sandbox state, and the
+host's chat history. No SSH keys, no Keychain, no Docker socket. Chromium runs
+with `--no-sandbox` inside the already-isolated container. Network is open
+(agents need internet); restrict it in `commonRunArgs` (cli/vivary.mjs) if needed.
+Apple `container` runs each sandbox in its own lightweight VM — a stronger
+boundary than Docker's shared-kernel isolation.
+
+## Apple `container` specifics
+
+Verified with `container` CLI 1.1.0. Handled automatically:
+
+- **Builder DNS bug**: the buildkit VM breaks Node.js DNS (`EAI_AGAIN`), so
+  `npm install` can never succeed in a native `container build`. `vivary build`
+  builds with Docker and loads via `container image load`
+  (`SANDBOX_NATIVE_BUILD=1` forces native).
+- **Runtime AAAA DNS bug**: the gateway DNS proxy mishandles AAAA queries from
+  glibc (breaks Node/curl). Entrypoints append `options no-aaaa` to
+  `/etc/resolv.conf` via the `fix-net` sudo helper (`SKIP_NET_FIX=1` opts out).
+- **`host.docker.internal`**: no native equivalent / `--add-host`; `fix-net`
+  maps it (and `gateway.docker.internal`) to the gateway = the host. Under
+  Docker the embedded DNS mapping is left untouched.
+- **Resources**: VMs default to 1 GB / 4 CPUs — too little for browser work,
+  so `vivary` defaults to 4 GB / 4 CPUs.
+- **Headed browser must run in the main process tree**: Chromium launched from
+  a `container exec` session renders a white/corrupted window into Xvfb (exec
+  path bug; fine under Docker). Everything the agent spawns in its session,
+  and SSH sessions, are in the main tree and render correctly.
+
+**Host-side gotchas** (macOS): container→host connections can be silently
+black-holed even though TCP handshakes succeed (the egress proxy ACKs every
+SYN — closed ports look "open"). Two switches must be open: System Settings →
+Privacy & Security → **Local Network** for `container-runtime-linux`, and any
+third-party firewall (e.g. Norton) must allow the flow — watch for its prompt.
+
+## Repository layout
+
+```
+cli/vivary.mjs         thin CLI entry (command dispatch, launcher dispatch)
+cli/core/              runtime abstraction, sandbox registry, lifecycle,
+                       broker kernel, image composer, plugin loader
+cli/plugins/<name>/    one feature = one plugin:
+                       plugin.mjs         host side (flags, run args, broker routes)
+                       image.dockerfile   fragment baked into the fat image
+                       rootfs/            files copied into the image
+                       entrypoint.d/      startup hooks (self-gated by env)
+cli/image/             core image (toolchain) + entrypoint runner
+bench/                 performance benchmarks
+```
+
+**Architecture**: a small core plus plugins (headed, ports, ssh, docker,
+host-open, clipboard, node-modules, agent-claude, agent-codex). `vivary build` composes
+ONE fat image from the core Dockerfile and every plugin fragment; features
+activate at runtime via env variables, so a single image serves all
+sandboxes. The container entrypoint just runs `/etc/entrypoint.d/*.sh` —
+each hook checks its own env variable.

@@ -2,16 +2,39 @@
   "name": "vivary",
   "version": "1.0.0",
   "description": "Run AI coding agents (Claude Code, Codex, Cursor) in isolated containers (Docker / Apple container)",
+  "license": "MIT",
+  "author": "Jiří Dudek",
+  "keywords": [
+    "ai",
+    "agent",
+    "sandbox",
+    "claude-code",
+    "codex",
+    "cursor",
+    "docker",
+    "apple-container",
+    "macos"
+  ],
   "type": "module",
-  "private": true,
-  "scripts": {
-    "test": "node --test 'test/**/*.test.mjs'"
-  },
   "bin": {
     "vivary": "./vivary.mjs",
     "slaude": "./vivary.mjs",
     "sodex": "./vivary.mjs",
     "sursor": "./vivary.mjs"
+  },
+  "files": [
+    "vivary.mjs",
+    "core/",
+    "image/",
+    "plugins/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.mjs'"
   },
   "engines": {
     "node": ">=20"
