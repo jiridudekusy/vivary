@@ -16,12 +16,17 @@ slaude               # sandboxed Claude Code for this project. That's it.
 ## Install
 
 ```bash
-npm install --prefix cli     # the CLI's one dependency (passkeys for `vivary web`)
+npm install -g @jiridudekusy/vivary   # the `vivary`, `slaude`, `sodex` and `sursor` commands
 vivary build                 # compose + build the image
-npm install -g ./cli         # installs the `vivary`, `slaude`, `sodex` and `sursor` commands
 ```
 
+From a checkout instead: `npm install --prefix cli && npm install -g ./cli`.
+
 Requires Node.js >= 20 on the host and Docker and/or Apple `container`.
+
+## License
+
+MIT
 
 ## CLI
 
