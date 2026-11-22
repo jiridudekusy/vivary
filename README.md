@@ -16,7 +16,7 @@ slaude               # sandboxed Claude Code for this project. That's it.
 ## Install
 
 ```bash
-npm install -g vivary        # the `vivary`, `slaude`, `sodex` and `sursor` commands
+npm install -g @jiridudekusy/vivary   # the `vivary`, `slaude`, `sodex` and `sursor` commands
 vivary build                 # compose + build the image
 ```
 
