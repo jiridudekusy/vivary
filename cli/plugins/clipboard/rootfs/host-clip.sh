@@ -9,6 +9,9 @@ if [ -z "${SBX_OPEN_URL:-}" ] && [ -f "$HOME/.sandbox-open.env" ]; then
     # shellcheck disable=SC1091
     . "$HOME/.sandbox-open.env"
 fi
+# The broker token lives in RAM (/run/vivary, handed in by vivary at every
+# start); a container from before that has it in its env instead.
+[ -r /run/vivary/broker-token ] && SBX_OPEN_TOKEN="$(cat /run/vivary/broker-token)"
 if [ -z "${SBX_OPEN_URL:-}" ]; then
     echo "host clipboard not available (start the sandbox with --clipboard)" >&2
     exit 1

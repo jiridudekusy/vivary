@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { IS_TTY, SANDBOXES_DIR, ask, die } from './util.mjs';
 import { parseBudget } from './host.mjs';
+import { validateGitConfig } from '../plugins/git/policy.mjs';
 
 export const PROJECT_CONFIG_NAME = '.vivary.json';
 export const APPROVED_COPY_NAME = 'vivary-approved.json';
@@ -40,9 +41,9 @@ const DOCKERD_FORBIDDEN = { hosts: 'it would expose the Docker API on the networ
 //   global  — ~/.vivary/vivary.json: the defaults, plus host policy
 //   profile — ~/.vivary/profiles/<name>.json
 const SCOPE_KEYS = {
-  project: [...SCALAR_KEYS, 'flags', 'egress', 'dockerd', 'profiles'],
+  project: [...SCALAR_KEYS, 'flags', 'egress', 'dockerd', 'profiles', 'git'],
   global: [...SCALAR_KEYS, 'flags', 'dockerd', 'memoryBudget'],
-  profile: [...SCALAR_KEYS, 'flags', 'egress', 'dockerd'],
+  profile: [...SCALAR_KEYS, 'flags', 'egress', 'dockerd', 'git'],
 };
 
 // Flags that were renamed. Kept only to make the failure precise: an old name
@@ -127,6 +128,8 @@ export function validateConfig(cfg, { scope = 'project', file = PROJECT_CONFIG_N
       throw new Error(`${file}: 'profiles' must be an array of profile names (letters, digits, . _ -)`);
     }
   }
+  // Which repositories the git proxy lets this sandbox reach (plugins/git).
+  if (cfg.git !== undefined) validateGitConfig(cfg.git, file);
   if (cfg.egress !== undefined) {
     if (cfg.egress === null || typeof cfg.egress !== 'object' || Array.isArray(cfg.egress)) {
       throw new Error(`${file}: 'egress' must be an object`);

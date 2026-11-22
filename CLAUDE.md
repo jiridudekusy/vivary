@@ -73,7 +73,7 @@ English, converse with the user in Czech.
   broker routes, agents/launchers) + `image.dockerfile` fragment + `rootfs/`
   + `entrypoint.d/` hooks. Plugins: egress(5), sudo(16), headed(20),
   ports(25), mounts(26), ssh(30), tailscale(35), docker(40), npmrc(45),
-  uunpm(47), host-open(50), clipboard(60), node-modules(70),
+  uunpm(47), host-open(50), git(52), clipboard(60), node-modules(70),
   agent-claude(80), agent-codex(85), agent-cursor(90).
   mounts: `-v/--volume HOST[:GUEST][:ro]`, bare path = SAME path in the
   sandbox; works on all 3 runtimes (RunSpec.mounts is structural, tart renders
@@ -172,6 +172,84 @@ English, converse with the user in Czech.
   getPlugins() unguarded (it die()s when plugins are not loaded): use
   `pluginsLoaded()`. Plan for the rest (vault):
   docs/design/2026-11-11-security-model-alignment.md §7.
+- VAULT (2026-11-21, user chose the macOS Keychain over a passkey-unlocked
+  vault): no vivary secret sits in plaintext on the Mac or in a container's
+  config. Long-lived ones live in the login Keychain (core/keychain.mjs,
+  service `vivary`, values via STDIN — `security add-generic-password ... -w`
+  as the last option reads the value twice from stdin, so values are one line;
+  never argv): `ashp-keys` (db/log/ca keys, compact JSON), `ashp-admin` (UI
+  password — its own item so it can be looked up), `ashp-agent:<name>`.
+  Per-run ones go into the container's RAM: every new container gets
+  `--tmpfs /run/vivary` (runtimes/spec.mjs) and after each start the host
+  writes them there through `<runtime> exec -i --user root` with the value on
+  stdin (core/runsecrets.mjs) — never `-e`, which baked them into Apple's
+  config.json / `docker inspect` for the container's whole life. Plugins hand
+  theirs in with `runSecrets(ctx, { tmpfs }) -> { name: content }` (core calls
+  it right after the start, before postUp; boot hooks that need one WAIT for
+  its file). Broker token: fresh per start, the Mac keeps only its sha256
+  (`broker-token.sha256`); the broker looks requests up by hash. npm: the
+  transformed ~/.npmrc (${VAR} expanded on the host) goes to
+  /run/vivary/npmrc and npm reads it as its GLOBAL config (/usr/etc/npmrc is a
+  symlink there, baked in; a dangling link is ignored) so ~/.npmrc keeps only
+  uunpm's ignore-scripts. Egress agent token: /run/vivary/egress-token, the
+  11-egress hook waits up to 60 s. ASHP: keys from the Keychain into
+  /run/vivary/ashp.env of the ASHP container, pre-entrypoint.sh waits and
+  sources it. Old plaintext (secrets.json, .ashp/agents/*) is moved into the
+  Keychain once and deleted — only after the Keychain write succeeded (losing
+  dbKey loses ASHP's db). LEGACY: a kept container created before has no
+  /run/vivary tmpfs — `hasRunTmpfs` says so, it keeps its baked env / Mac
+  files (broker-token, dot-config/npmrc-import) and every start prints the
+  --recreate hint; nothing is recreated automatically. tart guests still use
+  the legacy broker token (env file written into the VM). LIMIT, said plainly
+  to the user: Keychain items are readable without a prompt by any process
+  running as the user (`security`) — protection is at rest, from backups, and
+  from sandboxes (no Keychain access there), not from local malware.
+- git plugin (2026-11-21): git through the Mac, no credential in the sandbox.
+  Policy `git: [{repo, push?, transport?, account?}]` in the approved
+  .vivary.json and profiles (validated in core/config via plugins/git/
+  policy.mjs; read by `gitPolicy` WITHOUT die() — the broker must survive a
+  broken profile). The sandbox gets /run/vivary/gitconfig (runSecrets; the
+  image's /etc/gitconfig `include.path`s it, a missing include is ignored):
+  `core.sshCommand = vivary-git-ssh`, `ssh.variant = ssh` (else git calls an
+  unknown command the "simple" variant and refuses -p), url.insteadOf for
+  every https host -> `http://host.docker.internal:7377/git/<host>/`, and a
+  credential helper for that URL that returns the sandbox's broker token.
+  HTTPS: broker `brokerRaw` hook = smart-HTTP reverse proxy, Basic auth =
+  broker token, Mac credential from `git credential fill` (GitHub on this Mac
+  is HTTPS via `gh auth git-credential` — Mac ssh to github.com is DENIED,
+  publickey), cached 5 min in memory. SSH: broker `upgrade` hook /git-ssh,
+  frames broker->shim [type u8][len u32][data] (1 stdout, 2 stderr, 3 exit),
+  shim->broker raw stdin; `ssh -T -o BatchMode=yes -p <port> user@host
+  "<service> '<path>'"` on the Mac. Push check: the broker reads the pkt-line
+  ref-update list (up to the flush) BEFORE forwarding anything; HTTPS denial is
+  a receive-pack report (`ng <ref> vivary: ...`, inside side-band when asked)
+  so git shows "remote rejected"; a fetch/read-only denial is an `ERR` pkt in
+  the ref advertisement ("remote error: ..."). FORCE/DELETE (2026-11-21):
+  per-entry `force` and `delete` ref lists (subsets of `push`); an update of
+  a ref not in `force` must PROVE a fast-forward from the push alone: the
+  broker adds `no-thin` to receive-pack's advertisement (a client MUST NOT
+  send a thin pack then — verified: without it git sent "1 unresolved
+  delta"), spools the body to a 0700 temp dir (ssh has no body end:
+  `PackEnd` spots the pack's trailing hash), `git index-pack --stdin` into a
+  throwaway bare repo (it hashes every object, so a commit found under <new>
+  really has its parents) and walks parents in JS to <old>. <old> is safe to
+  take from the client: the server applies the update only if the ref still
+  is <old>. NEVER use the workspace .git for this: verified that a forged
+  loose object fools `git merge-base --is-ancestor` (git does not verify
+  hashes on read; only fsck does), and running git there reads the agent's
+  config (core.fsmonitor = a command on the Mac). When the walk leaves the
+  pack without meeting <old> (`walkPack` exits: commits the server already
+  has — agent continues from a main that merged its branch; a branch moved
+  onto an existing commit, empty pack), the broker asks the SERVER: a bare
+  commits-only copy (`clone --filter=tree:0`, refspecs heads+tags; a server
+  without filter support makes git fall back to a full copy by itself,
+  verified) per repo in ~/.vivary/.git-cache/<host>/<path>.git, fetched with
+  the Mac's credentials, one fetch at a time per repo, GIT_NO_LAZY_FETCH, then
+  `merge-base --is-ancestor <old> <exit>`. TEST TRAP: the end-to-end test
+  (test/git-proxy.test.mjs, real git + `git http-backend` CGI + local
+  upload/receive-pack for ssh) runs broker and upstream in the test process —
+  the git client MUST be spawned async, spawnSync deadlocks. Verified in a
+  real sandbox against github.com/jiridudekusy/vivary and uuCodebase.
 - `cli/image/` — core Dockerfile.core/.footer + entrypoint runner. The
   container entrypoint just runs `/etc/entrypoint.d/*.sh`; every hook
   self-gates on its env var (SANDBOX_SSH, SANDBOX_DOCKER, HEADED, ...).

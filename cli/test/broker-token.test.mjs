@@ -86,3 +86,47 @@ test('a token file that cannot be read is logged, not passed off as a bad token'
   const log = fs.readFileSync(path.join(root, '.broker', 'broker.log'), 'utf8');
   assert.match(log, / ENFILE token read for 'c': the Mac is out of file handles/);
 });
+
+// --- the vault step: a fresh token per container start, only its hash kept ---
+
+const { issueBrokerToken, deliverBrokerToken } = await import('../core/broker.mjs');
+
+test('an issued token is never stored: only its sha256, and it authorizes its sandbox', () => {
+  resetTokenCache();
+  mkSandbox('d', 'tok-d-legacy');
+  fs.rmSync(path.join(root, 'd', 'broker-token'));
+  const tok = issueBrokerToken('d');
+  const files = fs.readdirSync(path.join(root, 'd'));
+  for (const f of files) assert.ok(!fs.readFileSync(path.join(root, 'd', f), 'utf8').includes(tok), f);
+  assert.equal(sandboxByToken(tok, { now: 60_000 }).name, 'd');
+  // the next start replaces it: the old one dies at once
+  const next = issueBrokerToken('d');
+  assert.equal(sandboxByToken(tok, { now: 60_001 }), null);
+  assert.equal(sandboxByToken(next, { now: 66_000 }).name, 'd');
+});
+
+test('delivery: onto the tmpfs through exec stdin (never argv), and the legacy file goes', () => {
+  mkSandbox('e', 'tok-e-legacy');
+  const calls = [];
+  const run = (bin, args, opts = {}) => {
+    calls.push({ bin, args, input: opts.input });
+    return args.includes('awk') || args.some((a) => a.includes('/proc/mounts'))
+      ? { status: 0, stdout: 'tmpfs\n', stderr: '' }
+      : { status: 0, stdout: '', stderr: '' };
+  };
+  assert.equal(deliverBrokerToken({ name: 'e' }, 'container', 'c-e', { run }), 'tmpfs');
+  const write = calls[1];
+  assert.ok(write.args.includes('-i') && write.args.includes('root'));
+  assert.ok(!write.args.join(' ').includes(write.input), 'token not in argv');
+  assert.ok(!fs.existsSync(path.join(root, 'e', 'broker-token')), 'legacy plaintext removed');
+  resetTokenCache();
+  assert.equal(sandboxByToken(write.input, { now: 70_000 }).name, 'e');
+});
+
+test('a container without the tmpfs keeps its baked-in legacy token', () => {
+  mkSandbox('f', 'tok-f');
+  const run = () => ({ status: 0, stdout: 'overlay\n', stderr: '' });
+  assert.equal(deliverBrokerToken({ name: 'f' }, 'docker', 'c-f', { run }), 'legacy');
+  resetTokenCache();
+  assert.equal(sandboxByToken('tok-f', { now: 80_000 }).name, 'f');
+});

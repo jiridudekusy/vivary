@@ -46,4 +46,18 @@ if [ -n "$real_ns" ] && [ "$real_ns" != "127.0.0.11" ]; then
         || echo "WARNING: could not start upstream DNS forwarder on 127.0.0.11" >&2
 fi
 
+# 5. The keys arrive after the start, into RAM (/run/vivary/ashp.env, handed
+#    in by vivary through `exec`) — never as -e, which baked them into the
+#    container's config on the Mac. Wait for them; without them ASHP would
+#    start on fresh keys and could not read its own database.
+for _ in $(seq 1 60); do
+    [ -s /run/vivary/ashp.env ] && break
+    sleep 1
+done
+if [ ! -s /run/vivary/ashp.env ]; then
+    echo "vivary: ASHP secrets never arrived (/run/vivary/ashp.env) — not starting" >&2
+    exit 1
+fi
+. /run/vivary/ashp.env
+
 exec /app/entrypoint.sh "$@"

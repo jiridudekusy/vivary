@@ -422,6 +422,76 @@ into the sandbox or puts text on its clipboard. The way in is the same session:
   on its network with the old 8-character password. `vivary up <name>` says
   so; `vivary up <name> --recreate` moves it over.
 
+## Git through the Mac (`git` in `.vivary.json`)
+
+Agents use git as usual — `git clone https://github.com/...`, `git push` —
+but no git credential ever enters the sandbox: the Mac does the talking.
+
+```json
+"git": [
+  { "repo": "github.com/jiridudekusy/findmy", "push": ["agent/**"],
+    "force": ["agent/scratch/*"], "delete": ["agent/scratch/*"] },
+  { "repo": "uucodebase.plus4u.net/<awid>/<name>" },
+  { "repo": "github.com/acme/*", "push": ["feature/**"], "account": "jdk-acme" }
+]
+```
+
+- A repository no entry names cannot even be fetched. `push` lists the
+  branches the agent may update (`*` stays within one `/` segment, `**`
+  crosses it; `refs/tags/...` for tags); without it the repository is
+  read-only. A branch in `push` may be created and moved forward only;
+  `force` lists the ones that may also be rewritten (amend, rebase, reset —
+  moving a tag counts), `delete` the ones that may be deleted (both only
+  among those in `push`). Everything is checked before anything leaves the
+  Mac; the agent sees `! [remote rejected] main (vivary: ... not allowed)`.
+- How a fast-forward is proven without a copy of the repository: the broker
+  asks git for a self-contained pack (`no-thin`), indexes it in a throwaway
+  repository on the Mac (git computes every object's name from its content)
+  and walks the new commits' parents to the old tip. When the walk runs into
+  commits the server already has (the branch was merged into main and the
+  agent goes on from main; `git push origin main:agent/x` when agent/x is
+  behind), the broker asks the server: it keeps a commits-only copy
+  (`--filter=tree:0`; a full one where the server cannot filter) of the
+  repository's branches and tags in `~/.vivary/.git-cache`, fetched with the
+  Mac's own credentials. The sandbox's own `.git` is never trusted for this —
+  the agent can rewrite it.
+- **HTTPS hosts** (github.com, gitlab.com, bitbucket.org): the sandbox's git
+  is rewritten to the broker (`https://`, `git@host:` and `ssh://` spellings),
+  which adds the Mac's own credential from `git credential` (gh, Keychain).
+  `account` picks one of several logins.
+- **SSH hosts** (uuCodebase and anything else, or `"transport": "ssh"`): git's
+  ssh command in the sandbox is a shim that hands the request to the broker;
+  the broker runs only `git-upload-pack`/`git-receive-pack` with `ssh` on the
+  Mac, with your keys and `~/.ssh/config`.
+- Rules come from the approved `.vivary.json` and from profiles; a change
+  applies at the next start. Every fetch and push, allowed or not, is in the
+  broker log. Not covered: `gh`/API calls, signed pushes.
+
+## Secrets
+
+vivary keeps none of its own secrets in plaintext on the Mac or in a
+container's configuration:
+
+- **Per run, in RAM:** every new container gets a tmpfs at `/run/vivary`;
+  after each start vivary writes into it, through `exec` with the value on
+  stdin, what that run needs: the broker token (fresh per start — the Mac
+  keeps only its sha256), the npm credentials from your `~/.npmrc` (`--npmrc`;
+  npm reads them as its global config) and the egress agent token. Before,
+  they were `-e` variables baked into the container's config (Apple's
+  `config.json`, `docker inspect`) and copies under `~/.vivary`.
+- **Long-lived, in the login Keychain** (service `vivary`): ASHP's database,
+  log and CA keys, its admin password (`vivary: ashp-admin` in Keychain
+  Access, for the policy UI) and the agent tokens. An existing
+  `~/.vivary/.ashp/secrets.json` is moved over once and deleted.
+- What it protects against: backups and disk images, and every sandbox (none
+  can reach the Mac's Keychain). Not against a program running as you on the
+  unlocked Mac — it can read Keychain items through `security` like vivary
+  does; macOS protects items per app only for signed apps.
+- A container created before this keeps the old way until
+  `vivary up <name> --recreate`; every start says so. tart guests still use
+  the old broker token. Your own `~/.npmrc` and the agent logins
+  (`dot-claude`, `dot-codex`) are untouched.
+
 ## Security boundary
 
 The container sees only: the workspace, its own per-sandbox state, and the
